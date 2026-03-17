@@ -40,6 +40,20 @@ const vscode = __importStar(require("vscode"));
 const wellknown = __importStar(require("wellknown"));
 const VIEW_TYPE = "geojsonVisualEditor";
 const EMPTY_COLLECTION = { type: "FeatureCollection", features: [] };
+const EMPTY_COLLECTION_JSON = JSON.stringify(EMPTY_COLLECTION, null, 2);
+function isRecord(value) {
+    return typeof value === "object" && value !== null;
+}
+function isGeometryLike(value) {
+    if (!isRecord(value) || typeof value.type !== "string") {
+        return false;
+    }
+    if ("coordinates" in value) {
+        return true;
+    }
+    return (value.type === "GeometryCollection" &&
+        Array.isArray(value.geometries));
+}
 function activate(context) {
     context.subscriptions.push(GeoJsonEditorProvider.register(context));
     context.subscriptions.push(vscode.commands.registerCommand("geojson-visual-editor.open", (uri) => {
@@ -70,6 +84,7 @@ class GeoJsonEditorProvider {
         this.context = context;
     }
     resolveCustomTextEditor(document, webviewPanel) {
+        const documentKey = document.uri.toString();
         const { webview } = webviewPanel;
         webview.options = {
             enableScripts: true,
@@ -79,11 +94,11 @@ class GeoJsonEditorProvider {
         };
         webview.html = this.getWebviewContent(webview);
         const detectedFormat = this.detectDocumentFormat(document);
-        this.formatMap.set(document.uri.toString(), detectedFormat);
+        this.formatMap.set(documentKey, detectedFormat);
         const updateWebview = () => {
             const format = this.getDocumentFormat(document);
             const payload = this.toWebviewPayload(document.getText(), format);
-            webview.postMessage({
+            void webview.postMessage({
                 type: "update",
                 text: payload.text,
                 format,
@@ -91,13 +106,13 @@ class GeoJsonEditorProvider {
             });
         };
         const changeSubscription = vscode.workspace.onDidChangeTextDocument((event) => {
-            if (event.document.uri.toString() === document.uri.toString()) {
+            if (event.document.uri.toString() === documentKey) {
                 updateWebview();
             }
         });
         webviewPanel.onDidDispose(() => {
             changeSubscription.dispose();
-            this.formatMap.delete(document.uri.toString());
+            this.formatMap.delete(documentKey);
         });
         webview.onDidReceiveMessage(async (message) => {
             switch (message?.type) {
@@ -141,13 +156,13 @@ class GeoJsonEditorProvider {
         if (format === "wkt") {
             const trimmed = rawText.trim();
             if (!trimmed.length) {
-                return { text: JSON.stringify(EMPTY_COLLECTION, null, 2) };
+                return { text: EMPTY_COLLECTION_JSON };
             }
             try {
                 const geometry = wellknown.parse(trimmed);
                 if (!geometry) {
                     return {
-                        text: JSON.stringify(EMPTY_COLLECTION, null, 2),
+                        text: EMPTY_COLLECTION_JSON,
                         error: "Unable to parse WKT geometry.",
                     };
                 }
@@ -166,14 +181,14 @@ class GeoJsonEditorProvider {
             catch (error) {
                 const message = error instanceof Error ? error.message : "Failed to parse WKT.";
                 return {
-                    text: JSON.stringify(EMPTY_COLLECTION, null, 2),
+                    text: EMPTY_COLLECTION_JSON,
                     error: message,
                 };
             }
         }
         try {
             if (!rawText.trim().length) {
-                return { text: JSON.stringify(EMPTY_COLLECTION, null, 2) };
+                return { text: EMPTY_COLLECTION_JSON };
             }
             const parsed = JSON.parse(rawText);
             return { text: JSON.stringify(parsed, null, 2) };
@@ -181,7 +196,7 @@ class GeoJsonEditorProvider {
         catch (error) {
             const message = error instanceof Error ? error.message : "Invalid GeoJSON document.";
             return {
-                text: JSON.stringify(EMPTY_COLLECTION, null, 2),
+                text: EMPTY_COLLECTION_JSON,
                 error: message,
             };
         }
@@ -226,21 +241,22 @@ class GeoJsonEditorProvider {
         }
     }
     extractGeometry(input) {
-        if (!input) {
+        if (!isRecord(input)) {
             return null;
         }
         if (input.type === "FeatureCollection" && Array.isArray(input.features)) {
             return this.extractGeometry(input.features[0]);
         }
-        if (input.type === "Feature" && input.geometry) {
-            return input.geometry;
+        if (input.type === "Feature" && "geometry" in input) {
+            return this.extractGeometry(input.geometry);
         }
-        if (input.type && input.coordinates) {
+        if (isGeometryLike(input)) {
             return input;
         }
         return null;
     }
     getWebviewContent(webview) {
+        const utilsScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "geojson-utils.js"));
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js"));
         const stylesUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "main.css"));
         const nonce = getNonce();
@@ -424,6 +440,7 @@ class GeoJsonEditorProvider {
 				</section>
 			</div>
 			<script nonce="${nonce}" src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+      <script nonce="${nonce}" src="${utilsScriptUri}"></script>
 			<script nonce="${nonce}" src="${scriptUri}"></script>
 		</body>
 		</html>`;
@@ -433,7 +450,5 @@ function getNonce() {
     const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     return Array.from({ length: 32 }, () => possible.charAt(Math.floor(Math.random() * possible.length))).join("");
 }
-function deactivate() {
-    // Nothing to clean up explicitly.
-}
+function deactivate() { }
 //# sourceMappingURL=extension.js.map

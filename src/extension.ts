@@ -5,8 +5,34 @@ import * as wellknown from "wellknown";
 const VIEW_TYPE = "geojsonVisualEditor";
 
 type DocumentFormat = "geojson" | "wkt";
+type JsonObject = Record<string, unknown>;
+type GeoJsonGeometryLike = {
+  type: string;
+  coordinates?: unknown;
+  geometries?: unknown[];
+};
 
 const EMPTY_COLLECTION = { type: "FeatureCollection", features: [] };
+const EMPTY_COLLECTION_JSON = JSON.stringify(EMPTY_COLLECTION, null, 2);
+
+function isRecord(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null;
+}
+
+function isGeometryLike(value: unknown): value is GeoJsonGeometryLike {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+
+  if ("coordinates" in value) {
+    return true;
+  }
+
+  return (
+    value.type === "GeometryCollection" &&
+    Array.isArray((value as JsonObject).geometries)
+  );
+}
 
 export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(GeoJsonEditorProvider.register(context));
@@ -51,6 +77,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
     document: vscode.TextDocument,
     webviewPanel: vscode.WebviewPanel,
   ): void {
+    const documentKey = document.uri.toString();
     const { webview } = webviewPanel;
 
     webview.options = {
@@ -63,12 +90,12 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
     webview.html = this.getWebviewContent(webview);
 
     const detectedFormat = this.detectDocumentFormat(document);
-    this.formatMap.set(document.uri.toString(), detectedFormat);
+    this.formatMap.set(documentKey, detectedFormat);
 
     const updateWebview = () => {
       const format = this.getDocumentFormat(document);
       const payload = this.toWebviewPayload(document.getText(), format);
-      webview.postMessage({
+      void webview.postMessage({
         type: "update",
         text: payload.text,
         format,
@@ -78,7 +105,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument(
       (event) => {
-        if (event.document.uri.toString() === document.uri.toString()) {
+        if (event.document.uri.toString() === documentKey) {
           updateWebview();
         }
       },
@@ -86,7 +113,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
 
     webviewPanel.onDidDispose(() => {
       changeSubscription.dispose();
-      this.formatMap.delete(document.uri.toString());
+      this.formatMap.delete(documentKey);
     });
 
     webview.onDidReceiveMessage(async (message) => {
@@ -149,13 +176,13 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
     if (format === "wkt") {
       const trimmed = rawText.trim();
       if (!trimmed.length) {
-        return { text: JSON.stringify(EMPTY_COLLECTION, null, 2) };
+        return { text: EMPTY_COLLECTION_JSON };
       }
       try {
         const geometry = wellknown.parse(trimmed);
         if (!geometry) {
           return {
-            text: JSON.stringify(EMPTY_COLLECTION, null, 2),
+            text: EMPTY_COLLECTION_JSON,
             error: "Unable to parse WKT geometry.",
           };
         }
@@ -174,7 +201,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
         const message =
           error instanceof Error ? error.message : "Failed to parse WKT.";
         return {
-          text: JSON.stringify(EMPTY_COLLECTION, null, 2),
+          text: EMPTY_COLLECTION_JSON,
           error: message,
         };
       }
@@ -182,7 +209,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
 
     try {
       if (!rawText.trim().length) {
-        return { text: JSON.stringify(EMPTY_COLLECTION, null, 2) };
+        return { text: EMPTY_COLLECTION_JSON };
       }
       const parsed = JSON.parse(rawText);
       return { text: JSON.stringify(parsed, null, 2) };
@@ -190,7 +217,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
       const message =
         error instanceof Error ? error.message : "Invalid GeoJSON document.";
       return {
-        text: JSON.stringify(EMPTY_COLLECTION, null, 2),
+        text: EMPTY_COLLECTION_JSON,
         error: message,
       };
     }
@@ -207,9 +234,9 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
 
   private fromWebviewText(webviewText: string, format: DocumentFormat): string {
     if (format === "wkt") {
-      let geometry: any = null;
+      let geometry: GeoJsonGeometryLike | null = null;
       try {
-        const parsed = JSON.parse(webviewText);
+        const parsed: unknown = JSON.parse(webviewText);
         geometry = this.extractGeometry(parsed);
       } catch (error) {
         throw new Error(
@@ -246,8 +273,8 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
     }
   }
 
-  private extractGeometry(input: any): any {
-    if (!input) {
+  private extractGeometry(input: unknown): GeoJsonGeometryLike | null {
+    if (!isRecord(input)) {
       return null;
     }
 
@@ -255,11 +282,11 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
       return this.extractGeometry(input.features[0]);
     }
 
-    if (input.type === "Feature" && input.geometry) {
-      return input.geometry;
+    if (input.type === "Feature" && "geometry" in input) {
+      return this.extractGeometry(input.geometry);
     }
 
-    if (input.type && input.coordinates) {
+    if (isGeometryLike(input)) {
       return input;
     }
 
@@ -267,6 +294,13 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
   }
 
   private getWebviewContent(webview: vscode.Webview): string {
+    const utilsScriptUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(
+        this.context.extensionUri,
+        "media",
+        "geojson-utils.js",
+      ),
+    );
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, "media", "main.js"),
     );
@@ -456,6 +490,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
 				</section>
 			</div>
 			<script nonce="${nonce}" src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+      <script nonce="${nonce}" src="${utilsScriptUri}"></script>
 			<script nonce="${nonce}" src="${scriptUri}"></script>
 		</body>
 		</html>`;
@@ -470,6 +505,4 @@ function getNonce(): string {
   ).join("");
 }
 
-export function deactivate(): void {
-  // Nothing to clean up explicitly.
-}
+export function deactivate(): void {}
