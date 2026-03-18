@@ -12,3 +12,12 @@ All notable changes to the "geojson-visual-editor" extension will be documented 
 - New styling options: Use a gradient for numeric attributes, add a stroke colour, control line and stroke thickness, apply opacity based on a numeric attribute
 - Collapsible sections in the sidebar
 - Tooltip on hover
+
+## [0.3.0] - 2026-03-19
+
+- File size and feature count indicator
+- JSON syntax highlighting in the document data editor
+- Now respects the current VS Code theme (not always dark)
+- Basemap selector with three Carto styles: Positron, Voyager, Dark Matter
+- Round latitude and longitude fields
+- Removed WKT functionality (coming back in a later update)

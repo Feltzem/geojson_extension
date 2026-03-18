@@ -1,45 +1,91 @@
 # GeoJSON Visual Editor
 
-GeoJSON Visual Editor lets you open `.geojson` files inside VS Code with a purpose-built custom editor. Inspect your spatial data on a map, edit it, and colour features by an attribute.
+GeoJSON Visual Editor adds a custom map-first editor for spatial files in VS Code. It supports GeoJSON documents with live map preview, feature editing tools, and raw text editing in one view.
 
-## Features
+## Supported Files
 
-- Custom editor that becomes the default experience for `*.geojson` files in VS Code.
-- Split layout pairing an interactive map with a raw GeoJSON text editor.
-- Automatic geometry styling for points, lines, polygons, and their multi-geometry variants.
-- Attribute-driven styling: pick a property and the map automatically colours features with a unique palette.
-- Global styling controls for fill colour, optional stroke colour, line width, and stroke width.
-- Fit-to-data navigation to keep the map focused on your dataset.
-- Context-menu command **Open in GeoJSON Visual Editor** available from the Explorer.
+- `*.geojson`
 
-## Usage
+The custom editor is registered as the default editor for supported GeoJSON files.
 
-1. Right-click any GeoJSON file in the Explorer and choose **Open in GeoJSON Visual Editor** (or double-click after the first use).
-2. Use the map to visually inspect your features. Navigation controls let you pan and zoom.
-3. Use the Geometry styling section to set a shared fill colour, optional stroke colour, line width (for line data), and stroke width.
-4. Select an attribute in the sidebar to colour features by that property.
-5. Review or adjust the raw GeoJSON in the built-in editor. Click **Apply Changes** to validate and save back to disk.
+## Current Functionality
 
-If the JSON is invalid a clear error message is shown and the existing file contents remain untouched.
+### Visual editing and map inspection
 
-## Requirements
+- Interactive map preview.
+- Built-in pan/zoom controls and a fit-to-features button.
+- Feature hover tooltips that can be toggled on or off.
+- Live document metrics: feature count and file size.
+- Basemap switcher with Carto styles:
+  - Positron
+  - Voyager
+  - Dark Matter
 
-An active internet connection is required for the default MapLibre basemap (`https://demotiles.maplibre.org`).
+### Geometry styling
+
+- Global styling controls for:
+  - Fill color
+  - Optional stroke color and stroke width
+  - Line width
+- Color by attribute (categorical mode).
+- Numeric gradient styling with presets and custom gradients.
+- Opacity by numeric field using configurable min/max transparency.
+
+### Feature and property editing
+
+- Add new features from the sidebar:
+  - Point
+  - LineString
+  - Polygon
+- Select features directly on the map.
+- Delete selected features.
+- Edit feature properties:
+  - Add property
+  - Rename keys
+  - Update values (with basic type coercion)
+  - Remove property
+- Vertex editing mode for selected geometries (drag markers to update coordinates).
+
+### Raw data editing
+
+- Embedded raw document editor with JSON syntax highlighting.
+- Coordinate rounding tool (0-10 decimal places).
+- Apply workflow validates/normalizes data, updates the map, and saves back to disk.
+- Invalid JSON/GeoJSON input is surfaced with clear error messages.
 
 ## Commands
 
-| Command                                                                 | Description                                         |
-| ----------------------------------------------------------------------- | --------------------------------------------------- |
-| `GeoJSON: Open in GeoJSON Visual Editor` (`geojson-visual-editor.open`) | Opens the selected resource with the custom editor. |
+| Command                                                                 | Description                                                 |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `GeoJSON: Open in GeoJSON Visual Editor` (`geojson-visual-editor.open`) | Opens the selected `*.geojson` file with the custom editor. |
+
+## Usage
+
+1. Open a `.geojson` file from the Explorer. You can also run **GeoJSON: Open in GeoJSON Visual Editor**.
+2. Inspect and navigate data on the map.
+3. Use **Geometry Styling** to tune colors, stroke, gradients, and transparency.
+4. Optionally add/remove features, edit vertices, and update properties in the sidebar.
+5. Edit raw document data directly if needed.
+6. Click **Apply Changes** to save updates to disk.
+
+## Requirements
+
+An internet connection is required for remote basemap/style assets:
+
+- `https://basemaps.cartocdn.com`
+- `https://unpkg.com`
 
 ## Known Limitations
 
-- Very large datasets may impact webview performance.
+- Very large datasets can impact webview and map rendering performance.
+- Vertex editing currently focuses on common geometry paths (for multi-geometries, editing is limited to the first editable branch).
 
 ## Development
 
-Run `npm install` followed by `npm run watch` to compile TypeScript while developing. Use the **Run Extension** launch configuration to debug the extension inside the VS Code Extension Host.
+1. Run `npm install`.
+2. Run `npm run watch` for incremental TypeScript builds.
+3. Use the **Run Extension** launch configuration to debug in the Extension Host.
 
 ## Release Notes
 
-See `CHANGELOG.md` for the full history.
+See `CHANGELOG.md` for version history.

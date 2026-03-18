@@ -188,10 +188,12 @@
     }
   }
 
-  function roundFeatureCollection(collection) {
+  function roundFeatureCollection(collection, precision = 6) {
     if (!collection || collection.type !== "FeatureCollection") {
       return { type: "FeatureCollection", features: [] };
     }
+
+    const safePrecision = normalisePrecision(precision);
 
     const features = Array.isArray(collection.features)
       ? collection.features
@@ -203,7 +205,7 @@
           return null;
         }
         const geometry = feature.geometry
-          ? roundGeometry(feature.geometry)
+          ? roundGeometry(feature.geometry, safePrecision)
           : null;
         const roundedFeature = {
           type: "Feature",
@@ -214,7 +216,7 @@
           roundedFeature.id = feature.id;
         }
         if (Array.isArray(feature.bbox)) {
-          roundedFeature.bbox = roundBoundingBox(feature.bbox);
+          roundedFeature.bbox = roundBoundingBox(feature.bbox, safePrecision);
         }
         return roundedFeature;
       })
@@ -226,7 +228,7 @@
     };
   }
 
-  function roundGeometry(geometry) {
+  function roundGeometry(geometry, precision) {
     if (!geometry || typeof geometry !== "object") {
       return null;
     }
@@ -234,7 +236,7 @@
     if (geometry.type === "GeometryCollection") {
       const geometries = Array.isArray(geometry.geometries)
         ? geometry.geometries
-            .map((child) => roundGeometry(child))
+            .map((child) => roundGeometry(child, precision))
             .filter(Boolean)
         : [];
       const rounded = {
@@ -242,7 +244,7 @@
         geometries,
       };
       if (Array.isArray(geometry.bbox)) {
-        rounded.bbox = roundBoundingBox(geometry.bbox);
+        rounded.bbox = roundBoundingBox(geometry.bbox, precision);
       }
       return rounded;
     }
@@ -253,17 +255,17 @@
 
     const roundedGeometry = {
       type: geometry.type,
-      coordinates: roundCoordinates(geometry.coordinates),
+      coordinates: roundCoordinates(geometry.coordinates, precision),
     };
 
     if (Array.isArray(geometry.bbox)) {
-      roundedGeometry.bbox = roundBoundingBox(geometry.bbox);
+      roundedGeometry.bbox = roundBoundingBox(geometry.bbox, precision);
     }
 
     return roundedGeometry;
   }
 
-  function roundCoordinates(value) {
+  function roundCoordinates(value, precision) {
     if (!Array.isArray(value)) {
       return value;
     }
@@ -273,31 +275,33 @@
       typeof value[0] === "number" &&
       typeof value[1] === "number"
     ) {
-      return roundCoordinateTuple(value);
+      return roundCoordinateTuple(value, precision);
     }
 
-    return value.map((item) => roundCoordinates(item));
+    return value.map((item) => roundCoordinates(item, precision));
   }
 
-  function roundCoordinateTuple(tuple) {
+  function roundCoordinateTuple(tuple, precision) {
     if (!Array.isArray(tuple)) {
       return tuple;
     }
 
     const result = [];
-    const lon = roundNumber(normaliseLongitude(Number(tuple[0])));
-    const lat = roundNumber(clampLatitude(Number(tuple[1])));
+    const lon = roundNumber(normaliseLongitude(Number(tuple[0])), precision);
+    const lat = roundNumber(clampLatitude(Number(tuple[1])), precision);
     result.push(lon, lat);
 
     for (let index = 2; index < tuple.length; index += 1) {
       const value = tuple[index];
-      result.push(Number.isFinite(value) ? roundNumber(value) : value);
+      result.push(
+        Number.isFinite(value) ? roundNumber(Number(value), precision) : value,
+      );
     }
 
     return result;
   }
 
-  function roundBoundingBox(bbox) {
+  function roundBoundingBox(bbox, precision) {
     if (!Array.isArray(bbox)) {
       return bbox;
     }
@@ -306,10 +310,18 @@
         return value;
       }
       if (index % 2 === 0) {
-        return roundNumber(normaliseLongitude(value));
+        return roundNumber(normaliseLongitude(value), precision);
       }
-      return roundNumber(clampLatitude(value));
+      return roundNumber(clampLatitude(value), precision);
     });
+  }
+
+  function normalisePrecision(value) {
+    const parsed = Number.parseInt(String(value), 10);
+    if (!Number.isFinite(parsed)) {
+      return 6;
+    }
+    return Math.max(0, Math.min(10, parsed));
   }
 
   function roundNumber(value, precision = 6) {

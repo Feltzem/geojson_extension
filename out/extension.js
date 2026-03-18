@@ -35,25 +35,10 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
-const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
-const wellknown = __importStar(require("wellknown"));
 const VIEW_TYPE = "geojsonVisualEditor";
 const EMPTY_COLLECTION = { type: "FeatureCollection", features: [] };
 const EMPTY_COLLECTION_JSON = JSON.stringify(EMPTY_COLLECTION, null, 2);
-function isRecord(value) {
-    return typeof value === "object" && value !== null;
-}
-function isGeometryLike(value) {
-    if (!isRecord(value) || typeof value.type !== "string") {
-        return false;
-    }
-    if ("coordinates" in value) {
-        return true;
-    }
-    return (value.type === "GeometryCollection" &&
-        Array.isArray(value.geometries));
-}
 function activate(context) {
     context.subscriptions.push(GeoJsonEditorProvider.register(context));
     context.subscriptions.push(vscode.commands.registerCommand("geojson-visual-editor.open", (uri) => {
@@ -70,7 +55,6 @@ function activate(context) {
 }
 class GeoJsonEditorProvider {
     context;
-    formatMap = new Map();
     static register(context) {
         const provider = new GeoJsonEditorProvider(context);
         return vscode.window.registerCustomEditorProvider(VIEW_TYPE, provider, {
@@ -93,15 +77,12 @@ class GeoJsonEditorProvider {
             ],
         };
         webview.html = this.getWebviewContent(webview);
-        const detectedFormat = this.detectDocumentFormat(document);
-        this.formatMap.set(documentKey, detectedFormat);
         const updateWebview = () => {
-            const format = this.getDocumentFormat(document);
-            const payload = this.toWebviewPayload(document.getText(), format);
+            const payload = this.toWebviewPayload(document.getText());
             void webview.postMessage({
                 type: "update",
                 text: payload.text,
-                format,
+                format: "geojson",
                 error: payload.error ?? null,
             });
         };
@@ -112,7 +93,6 @@ class GeoJsonEditorProvider {
         });
         webviewPanel.onDidDispose(() => {
             changeSubscription.dispose();
-            this.formatMap.delete(documentKey);
         });
         webview.onDidReceiveMessage(async (message) => {
             switch (message?.type) {
@@ -144,48 +124,7 @@ class GeoJsonEditorProvider {
             await document.save();
         }
     }
-    getDocumentFormat(document) {
-        return (this.formatMap.get(document.uri.toString()) ??
-            this.detectDocumentFormat(document));
-    }
-    detectDocumentFormat(document) {
-        const ext = path.extname(document.uri.fsPath).toLowerCase();
-        return ext === ".wkt" ? "wkt" : "geojson";
-    }
-    toWebviewPayload(rawText, format) {
-        if (format === "wkt") {
-            const trimmed = rawText.trim();
-            if (!trimmed.length) {
-                return { text: EMPTY_COLLECTION_JSON };
-            }
-            try {
-                const geometry = wellknown.parse(trimmed);
-                if (!geometry) {
-                    return {
-                        text: EMPTY_COLLECTION_JSON,
-                        error: "Unable to parse WKT geometry.",
-                    };
-                }
-                const collection = {
-                    type: "FeatureCollection",
-                    features: [
-                        {
-                            type: "Feature",
-                            geometry,
-                            properties: {},
-                        },
-                    ],
-                };
-                return { text: JSON.stringify(collection, null, 2) };
-            }
-            catch (error) {
-                const message = error instanceof Error ? error.message : "Failed to parse WKT.";
-                return {
-                    text: EMPTY_COLLECTION_JSON,
-                    error: message,
-                };
-            }
-        }
+    toWebviewPayload(rawText) {
         try {
             if (!rawText.trim().length) {
                 return { text: EMPTY_COLLECTION_JSON };
@@ -202,34 +141,10 @@ class GeoJsonEditorProvider {
         }
     }
     async persistWebviewText(document, webviewText) {
-        const format = this.getDocumentFormat(document);
-        const converted = this.fromWebviewText(webviewText, format);
+        const converted = this.fromWebviewText(webviewText);
         await this.replaceDocumentText(document, converted);
     }
-    fromWebviewText(webviewText, format) {
-        if (format === "wkt") {
-            let geometry = null;
-            try {
-                const parsed = JSON.parse(webviewText);
-                geometry = this.extractGeometry(parsed);
-            }
-            catch (error) {
-                throw new Error(error instanceof Error
-                    ? error.message
-                    : "GeoJSON could not be parsed for WKT conversion.");
-            }
-            if (!geometry) {
-                return "";
-            }
-            try {
-                return wellknown.stringify(geometry) ?? "";
-            }
-            catch (error) {
-                throw new Error(error instanceof Error
-                    ? error.message
-                    : "Unable to convert geometry back to WKT.");
-            }
-        }
+    fromWebviewText(webviewText) {
         try {
             const parsed = JSON.parse(webviewText);
             return JSON.stringify(parsed, null, 2);
@@ -239,21 +154,6 @@ class GeoJsonEditorProvider {
                 ? error.message
                 : "Edited GeoJSON has invalid syntax.");
         }
-    }
-    extractGeometry(input) {
-        if (!isRecord(input)) {
-            return null;
-        }
-        if (input.type === "FeatureCollection" && Array.isArray(input.features)) {
-            return this.extractGeometry(input.features[0]);
-        }
-        if (input.type === "Feature" && "geometry" in input) {
-            return this.extractGeometry(input.geometry);
-        }
-        if (isGeometryLike(input)) {
-            return input;
-        }
-        return null;
     }
     getWebviewContent(webview) {
         const utilsScriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, "media", "geojson-utils.js"));
@@ -292,11 +192,34 @@ class GeoJsonEditorProvider {
 					<header class="panel-header">
 						<h1>GeoJSON Visual Editor</h1>
             <p class="subtitle">Inspect, style, and edit your spatial data.</p>
+            <div class="document-metrics" aria-live="polite">
+              <span id="feature-count-indicator" class="metric-pill">Features: 0</span>
+              <span id="file-size-indicator" class="metric-pill">Size: 0 B</span>
+            </div>
             <label for="tooltip-toggle-input" class="header-toggle">
               <input id="tooltip-toggle-input" type="checkbox" checked />
               <span>Show hover tooltips</span>
             </label>
 					</header>
+          <section class="properties-group collapsible-section" aria-live="polite">
+            <header class="group-header collapsible-header">
+              <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="basemap-content">
+                <span class="caret" aria-hidden="true">▾</span>
+                <span>Basemap</span>
+              </button>
+            </header>
+            <div id="basemap-content" class="collapsible-content">
+              <div class="control-group">
+                <label for="basemap-select">Basemap style</label>
+                <select id="basemap-select">
+                  <option value="carto-positron">Carto Positron</option>
+                  <option value="carto-voyager">Carto Voyager</option>
+                  <option value="carto-dark-matter">Carto Dark Matter</option>
+                </select>
+              </div>
+              <!-- Offline basemap option removed -->
+            </div>
+          </section>
           <section class="properties-group collapsible-section" aria-live="polite">
             <header class="group-header collapsible-header">
               <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="geometry-styling-content">
@@ -410,7 +333,7 @@ class GeoJsonEditorProvider {
               </button>
             </header>
             <div id="feature-properties-content" class="collapsible-content">
-              <p id="selection-hint">Select a feature on the map to edit its attributes.</p>
+              <p id="selection-hint">Select a feature on the map to edit its properties.</p>
               <div id="properties-container" class="properties-container" role="group" aria-describedby="selection-hint"></div>
               <div class="property-actions">
                 <button id="add-property-btn" type="button">Add property</button>
@@ -429,7 +352,17 @@ class GeoJsonEditorProvider {
             <div id="document-data-content" class="collapsible-content">
               <div class="control-group">
                 <label for="geojson-input" id="raw-label">Document data</label>
-                <textarea id="geojson-input" spellcheck="false"></textarea>
+                <div class="json-editor" aria-label="Document data editor">
+                  <pre id="geojson-highlight" aria-hidden="true"></pre>
+                  <textarea id="geojson-input" spellcheck="false"></textarea>
+                </div>
+              </div>
+              <div class="rounding-tools">
+                <label for="round-decimals-input" class="rounding-title">Coordinate precision (decimal places)</label>
+                <div class="control-group">
+                  <input id="round-decimals-input" type="number" min="0" max="10" step="1" value="6" />
+                </div>
+                <button id="round-coordinates-btn" type="button" class="secondary-btn">Round coordinates</button>
               </div>
               <div class="actions">
                 <button id="apply-btn" type="button">Apply Changes</button>

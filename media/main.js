@@ -1,6 +1,7 @@
 (() => {
   const vscode = acquireVsCodeApi();
   const textArea = document.getElementById("geojson-input");
+  const highlightLayer = document.getElementById("geojson-highlight");
   const attributeSelect = document.getElementById("attribute-select");
   const applyButton = document.getElementById("apply-btn");
   const statusNode = document.getElementById("status");
@@ -14,7 +15,12 @@
   const loadingIndicator = document.getElementById("loading-indicator");
   const rawLabel = document.getElementById("raw-label");
   const subtitle = document.querySelector(".subtitle");
+  const featureCountIndicator = document.getElementById(
+    "feature-count-indicator",
+  );
+  const fileSizeIndicator = document.getElementById("file-size-indicator");
   const tooltipToggleInput = document.getElementById("tooltip-toggle-input");
+  const basemapSelect = document.getElementById("basemap-select");
   const fillColourInput = document.getElementById("fill-colour-input");
   const strokeColourInput = document.getElementById("stroke-colour-input");
   const clearStrokeButton = document.getElementById("clear-stroke-btn");
@@ -46,6 +52,10 @@
   const opacityMaxInput = document.getElementById("opacity-max-input");
   const opacityMinValue = document.getElementById("opacity-min-value");
   const opacityMaxValue = document.getElementById("opacity-max-value");
+  const roundDecimalsInput = document.getElementById("round-decimals-input");
+  const roundCoordinatesButton = document.getElementById(
+    "round-coordinates-btn",
+  );
   const collapsibleToggles = document.querySelectorAll(".collapsible-toggle");
 
   const palette = [
@@ -100,6 +110,14 @@
     "geojson-point",
   ];
   const emptyCollection = { type: "FeatureCollection", features: [] };
+  const basemapStyles = {
+    "carto-positron":
+      "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    "carto-voyager":
+      "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+    "carto-dark-matter":
+      "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+  };
   const utils = window.geojsonEditorUtils;
 
   if (!utils) {
@@ -132,10 +150,12 @@
   let isEditingVertices = false;
   let vertexMarkers = [];
   let draggedVertex = null;
-  let documentFormat = "geojson";
   let loadingTimeout = null;
   let hoverPopup = null;
   let hoverTooltipsEnabled = Boolean(tooltipToggleInput?.checked ?? true);
+  let coordinatePrecision = parsePrecision(roundDecimalsInput?.value);
+  let selectedBasemap = basemapSelect?.value || "carto-positron";
+  let toolbarMetricsNode = null;
 
   const styleState = {
     fillColor: "#2563eb",
@@ -156,6 +176,8 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     initialiseMap();
+    initialiseJsonEditorHighlighting();
+    updateDocumentMetrics();
     vscode.postMessage({ type: "ready" });
   });
 
@@ -167,11 +189,6 @@
 
     if (message.type === "update") {
       const text = typeof message.text === "string" ? message.text : "";
-      const incomingFormat = message.format === "wkt" ? "wkt" : "geojson";
-      if (incomingFormat !== documentFormat) {
-        documentFormat = incomingFormat;
-        updateDocumentFormatUI();
-      }
       if (text !== currentText) {
         currentText = text;
       }
@@ -196,14 +213,13 @@
       if (!normalised) {
         throw new Error("Unsupported GeoJSON structure.");
       }
-      const rounded = roundFeatureCollection(normalised);
+      const rounded = roundFeatureCollection(normalised, coordinatePrecision);
       const { collection, notice } = enforceFormatConstraints(rounded);
       const serialised = JSON.stringify(collection, null, 2);
       currentText = serialised;
       currentGeoJson = collection;
-      textArea.value = serialised;
-      const shouldForceFit = documentFormat === "wkt";
-      updateMap(collection, { forceFit: shouldForceFit });
+      setEditorText(serialised);
+      updateMap(collection);
       populateAttributeOptions(collection);
       applyColouring(attributeSelect.value);
       refreshSelectionState();
@@ -214,10 +230,33 @@
         ? `Saved to workspace. ${notice}`
         : "Saved to workspace.";
       setStatus(successMessage.trim(), "success");
+      updateDocumentMetrics();
     } catch (error) {
       setStatus(formatError(error), "error");
     }
   });
+
+  if (basemapSelect) {
+    basemapSelect.addEventListener("change", () => {
+      selectedBasemap = basemapSelect.value;
+      applyBasemapStyle();
+    });
+  }
+
+  // offline basemap control removed
+
+  if (roundDecimalsInput) {
+    roundDecimalsInput.addEventListener("change", () => {
+      coordinatePrecision = parsePrecision(roundDecimalsInput.value);
+      roundDecimalsInput.value = String(coordinatePrecision);
+    });
+  }
+
+  if (roundCoordinatesButton) {
+    roundCoordinatesButton.addEventListener("click", () => {
+      roundCurrentCoordinates();
+    });
+  }
 
   attributeSelect.addEventListener("change", () => {
     updateAttributeColouringControls();
@@ -368,11 +407,6 @@
       return;
     }
 
-    if (documentFormat === "wkt") {
-      setStatus("WKT files do not support attribute properties.", "");
-      return;
-    }
-
     const properties = ensureProperties(feature);
     const newKey = generateUniqueKey(properties);
     properties[newKey] = "";
@@ -414,6 +448,7 @@
   });
 
   updateDocumentFormatUI();
+  updateBasemapControlsState();
 
   function initialiseCollapsibleSections() {
     collapsibleToggles.forEach((toggle) => {
@@ -432,12 +467,13 @@
   function initialiseMap() {
     map = new maplibregl.Map({
       container: "map",
-      style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+      style: getCurrentBasemapStyle(),
       center: [0, 0],
       zoom: 1,
     });
 
     map.addControl(new maplibregl.NavigationControl());
+    map.addControl(createDocumentMetricsControl(), "top-left");
     map.addControl(createFitToFeaturesControl(), "top-right");
 
     map.on("load", () => {
@@ -454,7 +490,108 @@
         pendingUpdate = null;
         updateMap(data, options);
       }
+      updateDocumentMetrics();
     });
+  }
+
+  function getCurrentBasemapStyle() {
+    return basemapStyles[selectedBasemap] || basemapStyles["carto-positron"];
+  }
+
+  function applyBasemapStyle() {
+    if (!map) {
+      return;
+    }
+
+    setLoading(true);
+    mapReady = false;
+    let settled = false;
+    let timeoutHandle = null;
+
+    const cleanup = () => {
+      map.off("style.load", onReady);
+      map.off("idle", onReady);
+      map.off("error", onError);
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+    };
+
+    const onReady = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      mapReady = true;
+      const data = currentGeoJson || emptyCollection;
+      updateMap(data);
+      applyColouring(attributeSelect.value);
+      updateStyleControlAvailability(data);
+      updateDocumentMetrics();
+      setLoading(false);
+    };
+
+    const onError = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      mapReady = Boolean(map?.isStyleLoaded?.());
+      setLoading(false);
+      setStatus("Unable to load selected basemap.", "error");
+    };
+
+    map.on("style.load", onReady);
+    map.on("idle", onReady);
+    map.on("error", onError);
+
+    timeoutHandle = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      mapReady = Boolean(map?.isStyleLoaded?.());
+      setLoading(false);
+      setStatus("Basemap change timed out.", "error");
+    }, 10000);
+
+    try {
+      map.setStyle(getCurrentBasemapStyle());
+    } catch (error) {
+      onError();
+    }
+  }
+
+  function createDocumentMetricsControl() {
+    return {
+      onAdd() {
+        const container = document.createElement("div");
+        container.className =
+          "maplibregl-ctrl maplibregl-ctrl-group toolbar-metrics-control";
+
+        const node = document.createElement("div");
+        node.className = "toolbar-metrics-label";
+        node.textContent = "Features: 0 | Size: 0 B";
+
+        container.appendChild(node);
+        toolbarMetricsNode = node;
+        return container;
+      },
+      onRemove() {
+        toolbarMetricsNode = null;
+      },
+    };
+  }
+
+  function updateBasemapControlsState() {
+    if (!basemapSelect) {
+      return;
+    }
+    // offline basemap feature removed; nothing to update here
   }
 
   function handleMapClick(event) {
@@ -592,44 +729,28 @@
   }
 
   function updateAddFeatureButtonsState() {
-    const hasWktFeatureLimit =
-      documentFormat === "wkt" &&
-      currentGeoJson &&
-      Array.isArray(currentGeoJson.features) &&
-      currentGeoJson.features.length >= 1;
-    const shouldDisable = !mapReady || hasWktFeatureLimit;
-    const title = hasWktFeatureLimit
-      ? "WKT files can only contain a single geometry. Delete the existing feature before adding another."
-      : "";
+    const shouldDisable = !mapReady;
 
     addFeatureButtons.forEach(({ element }) => {
       if (!element) {
         return;
       }
       element.disabled = shouldDisable;
-      if (shouldDisable && title) {
-        element.setAttribute("title", title);
-        element.setAttribute("aria-disabled", "true");
-      } else {
-        element.removeAttribute("title");
-        element.removeAttribute("aria-disabled");
-      }
+      element.removeAttribute("title");
+      element.removeAttribute("aria-disabled");
     });
   }
 
   function renderPropertiesPanel(feature) {
     propertiesContainer.innerHTML = "";
     updateAddFeatureButtonsState();
-    const isWktDocument = documentFormat === "wkt";
 
     if (!feature) {
       addPropertyButton.disabled = true;
       addPropertyButton.setAttribute("aria-disabled", "true");
       addPropertyButton.setAttribute(
         "title",
-        isWktDocument
-          ? "WKT files do not store properties."
-          : "Select a feature to add properties.",
+        "Select a feature to add properties.",
       );
       editVerticesButton.disabled = true;
       if (deleteFeatureButton) {
@@ -650,21 +771,6 @@
     editVerticesButton.textContent = isEditingVertices
       ? "Stop editing"
       : "Edit vertices";
-
-    if (isWktDocument) {
-      addPropertyButton.disabled = true;
-      addPropertyButton.setAttribute("aria-disabled", "true");
-      addPropertyButton.setAttribute(
-        "title",
-        "WKT files do not store properties.",
-      );
-      const notice = document.createElement("div");
-      notice.className = "empty-state";
-      notice.textContent =
-        "WKT files only store geometry. Attribute editing is disabled.";
-      propertiesContainer.appendChild(notice);
-      return;
-    }
 
     addPropertyButton.disabled = false;
     addPropertyButton.removeAttribute("aria-disabled");
@@ -799,12 +905,12 @@
       return;
     }
 
-    const rounded = roundFeatureCollection(currentGeoJson);
+    const rounded = roundFeatureCollection(currentGeoJson, coordinatePrecision);
     const { collection, notice } = enforceFormatConstraints(rounded);
     currentGeoJson = collection;
     const serialised = JSON.stringify(collection, null, 2);
     currentText = serialised;
-    textArea.value = serialised;
+    setEditorText(serialised);
     const { forceFit = false } = options;
     updateMap(collection, { forceFit });
     populateAttributeOptions(collection);
@@ -817,6 +923,7 @@
       "",
     );
     refreshSelectionState();
+    updateDocumentMetrics();
   }
 
   function ensureProperties(feature) {
@@ -854,7 +961,7 @@
 
   function loadTextIntoEditor(text) {
     setLoading(true);
-    textArea.value = text;
+    setEditorText(text);
     currentText = text;
     if (!text) {
       currentGeoJson = null;
@@ -865,6 +972,7 @@
       clearStatus();
       setLoading(false);
       updateAddFeatureButtonsState();
+      updateDocumentMetrics();
       return;
     }
 
@@ -874,13 +982,13 @@
       if (!normalised) {
         throw new Error("Unsupported GeoJSON structure.");
       }
-      const rounded = roundFeatureCollection(normalised);
+      const rounded = roundFeatureCollection(normalised, coordinatePrecision);
       const { collection, notice } = enforceFormatConstraints(rounded);
       const serialised = JSON.stringify(collection, null, 2);
       currentGeoJson = collection;
       currentText = serialised;
-      textArea.value = serialised;
-      const shouldForceFit = !hasFitOnce || documentFormat === "wkt";
+      setEditorText(serialised);
+      const shouldForceFit = !hasFitOnce;
       updateMap(collection, { forceFit: shouldForceFit });
       populateAttributeOptions(collection);
       updateStyleControlAvailability(collection);
@@ -895,11 +1003,13 @@
       } else {
         clearStatus();
       }
+      updateDocumentMetrics();
     } catch (error) {
       setStatus(formatError(error), "error");
     } finally {
       setLoading(false);
       updateAddFeatureButtonsState();
+      updateDocumentMetrics();
     }
   }
 
@@ -1651,58 +1761,181 @@
         )
       : [];
 
-    if (documentFormat !== "wkt") {
-      return {
-        collection: {
-          type: "FeatureCollection",
-          features,
-        },
-        notice: "",
-      };
-    }
-
-    if (!features.length) {
-      return {
-        collection: { type: "FeatureCollection", features: [] },
-        notice: "",
-      };
-    }
-
-    const [first] = features;
-    const noticeParts = [];
-
-    if (features.length > 1) {
-      noticeParts.push("Only the first feature is saved for WKT files.");
-    }
-
-    const properties = sanitizeProperties(first.properties);
-    if (Object.keys(properties).length > 0) {
-      noticeParts.push("Properties are not preserved when saving to WKT.");
-    }
-
-    const geometry =
-      first && first.geometry ? cloneGeometry(first.geometry) : null;
-    if (!geometry) {
-      noticeParts.push("Add geometry to save this WKT file.");
-    }
-
-    const constrainedFeatures = geometry
-      ? [
-          {
-            type: "Feature",
-            geometry,
-            properties: {},
-          },
-        ]
-      : [];
-
     return {
       collection: {
         type: "FeatureCollection",
-        features: constrainedFeatures,
+        features,
       },
-      notice: noticeParts.join(" ").trim(),
+      notice: "",
     };
+  }
+
+  function roundCurrentCoordinates() {
+    const nextText = textArea.value;
+    if (!nextText || !nextText.trim().length) {
+      setStatus("GeoJSON cannot be empty.", "error");
+      return;
+    }
+
+    coordinatePrecision = parsePrecision(roundDecimalsInput?.value);
+    if (roundDecimalsInput) {
+      roundDecimalsInput.value = String(coordinatePrecision);
+    }
+
+    try {
+      const parsed = JSON.parse(nextText);
+      const normalised = normaliseGeoJson(parsed);
+      if (!normalised) {
+        throw new Error("Unsupported GeoJSON structure.");
+      }
+
+      const rounded = roundFeatureCollection(normalised, coordinatePrecision);
+      const { collection, notice } = enforceFormatConstraints(rounded);
+      const serialised = JSON.stringify(collection, null, 2);
+
+      currentGeoJson = collection;
+      currentText = serialised;
+      setEditorText(serialised);
+      updateMap(collection);
+      populateAttributeOptions(collection);
+      updateStyleControlAvailability(collection);
+      applyColouring(attributeSelect.value);
+      refreshSelectionState();
+      updateDocumentMetrics();
+
+      const suffix = coordinatePrecision === 1 ? "place" : "places";
+      const statusMessage = notice
+        ? `${notice} Coordinates rounded to ${coordinatePrecision} decimal ${suffix}.`
+        : `Coordinates rounded to ${coordinatePrecision} decimal ${suffix}.`;
+      setStatus(`${statusMessage} Click Apply Changes to save to disk.`, "");
+    } catch (error) {
+      setStatus(formatError(error), "error");
+    }
+  }
+
+  function parsePrecision(value) {
+    const parsed = Number.parseInt(String(value ?? "6"), 10);
+    if (!Number.isFinite(parsed)) {
+      return 6;
+    }
+    return Math.max(0, Math.min(10, parsed));
+  }
+
+  function initialiseJsonEditorHighlighting() {
+    if (!textArea) {
+      return;
+    }
+
+    textArea.addEventListener("input", () => {
+      currentText = textArea.value;
+      updateJsonHighlight(currentText);
+      syncJsonHighlightScroll();
+      updateDocumentMetrics();
+    });
+
+    textArea.addEventListener("scroll", () => {
+      syncJsonHighlightScroll();
+    });
+
+    updateJsonHighlight(textArea.value || "");
+    syncJsonHighlightScroll();
+  }
+
+  function setEditorText(text) {
+    textArea.value = text;
+    updateJsonHighlight(text);
+    syncJsonHighlightScroll();
+  }
+
+  function syncJsonHighlightScroll() {
+    if (!highlightLayer || !textArea) {
+      return;
+    }
+
+    highlightLayer.scrollTop = textArea.scrollTop;
+    highlightLayer.scrollLeft = textArea.scrollLeft;
+  }
+
+  function updateJsonHighlight(text) {
+    if (!highlightLayer) {
+      return;
+    }
+
+    const source = typeof text === "string" ? text : "";
+    highlightLayer.innerHTML = highlightJson(source);
+  }
+
+  function highlightJson(text) {
+    if (!text.length) {
+      return " ";
+    }
+
+    const tokenRegex =
+      /"(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+
+    let html = "";
+    let lastIndex = 0;
+    let match = tokenRegex.exec(text);
+
+    while (match) {
+      const token = match[0];
+      const start = match.index;
+      html += escapeHtml(text.slice(lastIndex, start));
+
+      let className = "json-number";
+      if (token.startsWith('"')) {
+        className = token.endsWith(":") ? "json-key" : "json-string";
+      } else if (token === "true" || token === "false") {
+        className = "json-boolean";
+      } else if (token === "null") {
+        className = "json-null";
+      }
+
+      html += `<span class="${className}">${escapeHtml(token)}</span>`;
+      lastIndex = tokenRegex.lastIndex;
+      match = tokenRegex.exec(text);
+    }
+
+    html += escapeHtml(text.slice(lastIndex));
+    return html;
+  }
+
+  function updateDocumentMetrics() {
+    const featureCount = collectFeatures(currentGeoJson).length;
+    const fileBytes = getUtf8ByteLength(currentText || "");
+    const featureLabel = `Features: ${featureCount}`;
+    const sizeLabel = `Size: ${formatBytes(fileBytes)}`;
+
+    if (featureCountIndicator) {
+      featureCountIndicator.textContent = featureLabel;
+    }
+    if (fileSizeIndicator) {
+      fileSizeIndicator.textContent = sizeLabel;
+    }
+    if (toolbarMetricsNode) {
+      toolbarMetricsNode.textContent = `${featureLabel} | ${sizeLabel}`;
+    }
+  }
+
+  function getUtf8ByteLength(value) {
+    try {
+      return new TextEncoder().encode(value).length;
+    } catch (error) {
+      return value.length;
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+      return "0 B";
+    }
+    if (bytes < 1024) {
+      return `${bytes} B`;
+    }
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   }
 
   function setLoading(isLoading) {
@@ -1731,27 +1964,14 @@
 
   function updateDocumentFormatUI() {
     if (rawLabel) {
-      rawLabel.textContent =
-        documentFormat === "wkt"
-          ? "Document data (WKT preview)"
-          : "Document data";
+      rawLabel.textContent = "Document data";
     }
 
     if (subtitle) {
-      subtitle.textContent =
-        documentFormat === "wkt"
-          ? "Editing a WKT geometry with instant map feedback."
-          : "Inspect, style, and edit your spatial data.";
+      subtitle.textContent = "Inspect, style, and edit your spatial data.";
     }
 
-    if (documentFormat === "wkt") {
-      textArea.setAttribute(
-        "title",
-        "Edits convert back to WKT when you apply changes.",
-      );
-    } else {
-      textArea.removeAttribute("title");
-    }
+    textArea.removeAttribute("title");
 
     updateAddFeatureButtonsState();
   }
