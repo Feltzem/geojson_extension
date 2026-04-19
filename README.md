@@ -58,6 +58,8 @@ The custom editor is registered as the default editor for supported GeoJSON file
 - Apply workflow validates/normalizes data, updates the map, and saves back to disk.
 - Invalid JSON/GeoJSON input is surfaced with clear error messages.
 
+![Capture](https://github.com/user-attachments/assets/9294b15f-382a-4bae-b54a-f8c0e5f3814f)
+
 ## Commands
 
 | Command                                                                 | Description                                                 |
