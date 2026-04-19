@@ -44,7 +44,12 @@ The custom editor is registered as the default editor for supported GeoJSON file
   - Rename keys
   - Update values (with basic type coercion)
   - Remove property
-- Vertex editing mode for selected geometries (drag markers to update coordinates).
+- Vertex editing mode for selected geometries:
+  - Drag markers to move vertices.
+  - Left-click near a line segment or polygon edge to insert a new vertex.
+  - Right-click a vertex (or its marker) to delete it.
+  - The map cursor switches to a crosshair while editing and markers show as red draggable handles.
+  - Polygon rings remain closed automatically; deletions that would create invalid geometry are prevented.
 
 ### Raw data editing
 
@@ -65,6 +70,9 @@ The custom editor is registered as the default editor for supported GeoJSON file
 2. Inspect and navigate data on the map.
 3. Use **Geometry Styling** to tune colors, stroke, gradients, and transparency.
 4. Optionally add/remove features, edit vertices, and update properties in the sidebar.
+
+- While in vertex edit mode: left-click near an edge to add a vertex; right-click a vertex to remove it. Drag markers to reposition vertices.
+
 5. Edit raw document data directly if needed.
 6. Click **Apply Changes** to save updates to disk.
 

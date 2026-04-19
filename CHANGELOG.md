@@ -21,3 +21,7 @@ All notable changes to the "geojson-visual-editor" extension will be documented 
 - Basemap selector with three Carto styles: Positron, Voyager, Dark Matter
 - Round latitude and longitude fields
 - Removed WKT functionality (coming back in a later update)
+
+## [0.4.0] - 2026-04-19
+
+- Vertex editing enhancements: add and delete vertices while editing a selected feature. Left-click near a line segment or polygon edge to insert a vertex; right-click an existing vertex (or its marker) to delete it. Vertex markers remain draggable and the cursor switches to a crosshair while editing. Polygon rings are kept closed automatically and deletions that would produce invalid geometry are blocked.

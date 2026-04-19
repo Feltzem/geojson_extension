@@ -156,6 +156,8 @@
   let coordinatePrecision = parsePrecision(roundDecimalsInput?.value);
   let selectedBasemap = basemapSelect?.value || "carto-positron";
   let toolbarMetricsNode = null;
+  const maxVertexInsertDistancePx = 24;
+  const maxVertexDeleteDistancePx = 16;
 
   const styleState = {
     fillColor: "#2563eb",
@@ -480,10 +482,11 @@
       mapReady = true;
       updateAddFeatureButtonsState();
       map.on("click", handleMapClick);
+      map.on("contextmenu", handleMapContextMenu);
       map.on("mousemove", handleMapHover);
       map.getCanvasContainer().addEventListener("mouseleave", () => {
         hideHoverTooltip();
-        map.getCanvas().style.cursor = "";
+        map.getCanvas().style.cursor = isEditingVertices ? "crosshair" : "";
       });
       if (pendingUpdate) {
         const { data, options } = pendingUpdate;
@@ -599,8 +602,8 @@
       return;
     }
 
-    // Don't handle feature selection if we're editing vertices
     if (isEditingVertices) {
+      handleVertexEditClick(event);
       return;
     }
 
@@ -623,11 +626,45 @@
     }
   }
 
+  function handleMapContextMenu(event) {
+    if (!mapReady || !isEditingVertices) {
+      return;
+    }
+
+    event.originalEvent?.preventDefault?.();
+
+    if (isMarkerInteraction(event)) {
+      return;
+    }
+
+    const feature = getSelectedFeature();
+    if (!feature) {
+      exitVertexEditMode();
+      return;
+    }
+
+    deleteNearestVertex(feature, event.point);
+  }
+
+  function handleVertexEditClick(event) {
+    const feature = getSelectedFeature();
+    if (!feature) {
+      exitVertexEditMode();
+      return;
+    }
+
+    if (isMarkerInteraction(event)) {
+      return;
+    }
+
+    addVertexAtPoint(feature, event.lngLat, event.point);
+  }
+
   function handleMapHover(event) {
     if (!mapReady || !hoverTooltipsEnabled || isEditingVertices) {
       hideHoverTooltip();
       if (mapReady) {
-        map.getCanvas().style.cursor = "";
+        map.getCanvas().style.cursor = isEditingVertices ? "crosshair" : "";
       }
       return;
     }
@@ -2103,10 +2140,10 @@
     }
 
     isEditingVertices = true;
-    setStatus(
-      "Drag vertices to edit geometry. Click Stop editing when done.",
-      "",
-    );
+    setStatus(getVertexEditInstructions(feature), "");
+    if (mapReady) {
+      map.getCanvas().style.cursor = "crosshair";
+    }
     updateVertexMarkers(feature);
     renderPropertiesPanel(feature);
   }
@@ -2114,6 +2151,9 @@
   function exitVertexEditMode() {
     isEditingVertices = false;
     clearVertexMarkers();
+    if (mapReady) {
+      map.getCanvas().style.cursor = "";
+    }
     setStatus("", "");
     const feature = getSelectedFeature();
     if (feature) {
@@ -2179,8 +2219,336 @@
         }
       });
 
+      const markerElement = marker.getElement();
+      markerElement.title = "Drag to move. Right-click to delete.";
+
+      ["mousedown", "mouseup", "click", "dblclick"].forEach((eventName) => {
+        markerElement.addEventListener(eventName, (vertexEvent) => {
+          vertexEvent.stopPropagation();
+        });
+      });
+
+      markerElement.addEventListener("contextmenu", (vertexEvent) => {
+        vertexEvent.preventDefault();
+        vertexEvent.stopPropagation();
+        deleteVertexAtIndex(feature, index);
+      });
+
       vertexMarkers.push(marker);
     });
+  }
+
+  function getVertexEditInstructions(feature) {
+    const geometryType = feature?.geometry?.type;
+
+    switch (geometryType) {
+      case "Point":
+        return "Drag the point marker to move it. Points do not support adding or deleting vertices.";
+      case "MultiPoint":
+        return "Drag points to move them. Click the map to add a point and right-click a point to delete it.";
+      case "LineString":
+      case "MultiLineString":
+        return "Drag vertices to edit geometry. Click near a line segment to add a vertex and right-click a vertex to delete it.";
+      case "Polygon":
+      case "MultiPolygon":
+        return "Drag vertices to edit geometry. Click near an edge to add a vertex and right-click a vertex to delete it.";
+      default:
+        return "Drag vertices to edit geometry. Click the map to add a vertex and right-click a vertex to delete it.";
+    }
+  }
+
+  function isMarkerInteraction(event) {
+    const target = event?.originalEvent?.target;
+    return Boolean(
+      target &&
+      typeof target.closest === "function" &&
+      target.closest(".maplibregl-marker"),
+    );
+  }
+
+  function normaliseCoordinate(coordinate) {
+    return [
+      normaliseLongitude(coordinate?.[0]),
+      clampLatitude(coordinate?.[1]),
+    ];
+  }
+
+  function getEditableCoordinatePath(geometry) {
+    if (!geometry || typeof geometry !== "object") {
+      return null;
+    }
+
+    switch (geometry.type) {
+      case "MultiPoint":
+        return {
+          path: geometry.coordinates,
+          closed: false,
+          minimumVertices: 1,
+        };
+      case "LineString":
+        return {
+          path: geometry.coordinates,
+          closed: false,
+          minimumVertices: 2,
+        };
+      case "Polygon":
+        return geometry.coordinates[0]
+          ? {
+              path: geometry.coordinates[0],
+              closed: true,
+              minimumVertices: 3,
+            }
+          : null;
+      case "MultiLineString":
+        return geometry.coordinates[0]
+          ? {
+              path: geometry.coordinates[0],
+              closed: false,
+              minimumVertices: 2,
+            }
+          : null;
+      case "MultiPolygon":
+        return geometry.coordinates[0] && geometry.coordinates[0][0]
+          ? {
+              path: geometry.coordinates[0][0],
+              closed: true,
+              minimumVertices: 3,
+            }
+          : null;
+      default:
+        return null;
+    }
+  }
+
+  function getEditableVertexCount(pathDetails) {
+    if (!pathDetails || !Array.isArray(pathDetails.path)) {
+      return 0;
+    }
+
+    return pathDetails.closed
+      ? Math.max(0, pathDetails.path.length - 1)
+      : pathDetails.path.length;
+  }
+
+  function findNearestVertexIndex(feature, point) {
+    const coordinates = extractCoordinates(feature?.geometry);
+    let nearestIndex = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    coordinates.forEach((coordinate, index) => {
+      const projected = map.project([coordinate[0], coordinate[1]]);
+      const distance = Math.hypot(projected.x - point.x, projected.y - point.y);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    });
+
+    return Number.isInteger(nearestIndex)
+      ? { index: nearestIndex, distance: nearestDistance }
+      : null;
+  }
+
+  function findNearestSegmentIndex(feature, point) {
+    const geometry = feature?.geometry;
+    const coordinates = extractCoordinates(geometry);
+    if (!geometry || coordinates.length < 2) {
+      return null;
+    }
+
+    const isClosed =
+      geometry.type === "Polygon" || geometry.type === "MultiPolygon";
+    const segmentCount = isClosed ? coordinates.length : coordinates.length - 1;
+    let nearestIndex = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+
+    for (let index = 0; index < segmentCount; index += 1) {
+      const start = map.project([coordinates[index][0], coordinates[index][1]]);
+      const endCoordinate = isClosed
+        ? coordinates[(index + 1) % coordinates.length]
+        : coordinates[index + 1];
+      const end = map.project([endCoordinate[0], endCoordinate[1]]);
+      const distance = getPointToSegmentDistance(point, start, end);
+
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearestIndex = index;
+      }
+    }
+
+    return Number.isInteger(nearestIndex)
+      ? { index: nearestIndex, distance: nearestDistance }
+      : null;
+  }
+
+  function getPointToSegmentDistance(point, start, end) {
+    const deltaX = end.x - start.x;
+    const deltaY = end.y - start.y;
+    const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+
+    if (!lengthSquared) {
+      return Math.hypot(point.x - start.x, point.y - start.y);
+    }
+
+    const projection =
+      ((point.x - start.x) * deltaX + (point.y - start.y) * deltaY) /
+      lengthSquared;
+    const clampedProjection = Math.max(0, Math.min(1, projection));
+    const closestX = start.x + clampedProjection * deltaX;
+    const closestY = start.y + clampedProjection * deltaY;
+
+    return Math.hypot(point.x - closestX, point.y - closestY);
+  }
+
+  function addVertexAtPoint(feature, lngLat, point) {
+    if (!feature?.geometry) {
+      return false;
+    }
+
+    const geometryType = feature.geometry.type;
+    const coordinate = normaliseCoordinate([lngLat.lng, lngLat.lat]);
+
+    if (geometryType === "Point") {
+      setStatus(getVertexEditInstructions(feature), "");
+      return false;
+    }
+
+    if (geometryType === "MultiPoint") {
+      feature.geometry.coordinates.push(coordinate);
+      commitGeometryChanges("Vertex added.");
+      return true;
+    }
+
+    const nearestSegment = findNearestSegmentIndex(feature, point);
+    if (
+      !nearestSegment ||
+      nearestSegment.distance > maxVertexInsertDistancePx ||
+      !insertGeometryCoordinate(feature, nearestSegment.index, coordinate)
+    ) {
+      setStatus(getVertexEditInstructions(feature), "");
+      return false;
+    }
+
+    commitGeometryChanges("Vertex added.");
+    return true;
+  }
+
+  function insertGeometryCoordinate(feature, segmentIndex, coordinate) {
+    const pathDetails = getEditableCoordinatePath(feature?.geometry);
+    if (!pathDetails || !Array.isArray(pathDetails.path)) {
+      return false;
+    }
+
+    const vertexCount = getEditableVertexCount(pathDetails);
+    if (!vertexCount) {
+      return false;
+    }
+
+    const nextCoordinate = normaliseCoordinate(coordinate);
+    const insertAt =
+      pathDetails.closed && segmentIndex === vertexCount - 1
+        ? pathDetails.path.length - 1
+        : segmentIndex + 1;
+    pathDetails.path.splice(insertAt, 0, nextCoordinate);
+
+    if (pathDetails.closed && pathDetails.path.length > 1) {
+      pathDetails.path[pathDetails.path.length - 1] = [...pathDetails.path[0]];
+    }
+
+    return true;
+  }
+
+  function deleteNearestVertex(feature, point) {
+    const nearestVertex = findNearestVertexIndex(feature, point);
+    if (!nearestVertex || nearestVertex.distance > maxVertexDeleteDistancePx) {
+      setStatus("Right-click directly on a vertex to delete it.", "");
+      return false;
+    }
+
+    return deleteVertexAtIndex(feature, nearestVertex.index);
+  }
+
+  function deleteVertexAtIndex(feature, index) {
+    const result = deleteGeometryCoordinate(feature, index);
+    if (!result.ok) {
+      setStatus(result.message, result.type || "");
+      return false;
+    }
+
+    commitGeometryChanges("Vertex deleted.");
+    return true;
+  }
+
+  function deleteGeometryCoordinate(feature, index) {
+    const geometry = feature?.geometry;
+    if (!geometry) {
+      return {
+        ok: false,
+        message: "Select a feature to edit vertices.",
+        type: "",
+      };
+    }
+
+    if (geometry.type === "Point") {
+      return {
+        ok: false,
+        message:
+          "Points keep a single coordinate. Drag the marker to reposition it instead.",
+        type: "",
+      };
+    }
+
+    const pathDetails = getEditableCoordinatePath(geometry);
+    const vertexCount = getEditableVertexCount(pathDetails);
+    if (!pathDetails || !Array.isArray(pathDetails.path)) {
+      return {
+        ok: false,
+        message: "This geometry type does not support vertex deletion.",
+        type: "error",
+      };
+    }
+
+    if (index < 0 || index >= vertexCount) {
+      return {
+        ok: false,
+        message: "Unable to determine which vertex to delete.",
+        type: "error",
+      };
+    }
+
+    if (vertexCount <= pathDetails.minimumVertices) {
+      return {
+        ok: false,
+        message: getMinimumVertexMessage(
+          geometry.type,
+          pathDetails.minimumVertices,
+        ),
+        type: "",
+      };
+    }
+
+    pathDetails.path.splice(index, 1);
+
+    if (pathDetails.closed && pathDetails.path.length > 1) {
+      pathDetails.path[pathDetails.path.length - 1] = [...pathDetails.path[0]];
+    }
+
+    return { ok: true };
+  }
+
+  function getMinimumVertexMessage(geometryType, minimumVertices) {
+    switch (geometryType) {
+      case "LineString":
+      case "MultiLineString":
+        return `Lines need at least ${minimumVertices} vertices.`;
+      case "Polygon":
+      case "MultiPolygon":
+        return `Polygons need at least ${minimumVertices} vertices.`;
+      case "MultiPoint":
+        return "A multipoint feature needs at least one point.";
+      default:
+        return `This feature needs at least ${minimumVertices} vertices.`;
+    }
   }
 
   function extractCoordinates(geometry) {
@@ -2190,32 +2558,14 @@
       case "Point":
         coordinates.push(geometry.coordinates);
         break;
-      case "LineString":
-        geometry.coordinates.forEach((coord) => coordinates.push(coord));
-        break;
-      case "Polygon":
-        // Only edit exterior ring for simplicity
-        if (geometry.coordinates[0]) {
-          geometry.coordinates[0].forEach((coord) => coordinates.push(coord));
+      default: {
+        const pathDetails = getEditableCoordinatePath(geometry);
+        const vertexCount = getEditableVertexCount(pathDetails);
+        for (let index = 0; index < vertexCount; index += 1) {
+          coordinates.push(pathDetails.path[index]);
         }
         break;
-      case "MultiPoint":
-        geometry.coordinates.forEach((coord) => coordinates.push(coord));
-        break;
-      case "MultiLineString":
-        // Only edit first line for simplicity
-        if (geometry.coordinates[0]) {
-          geometry.coordinates[0].forEach((coord) => coordinates.push(coord));
-        }
-        break;
-      case "MultiPolygon":
-        // Only edit first polygon's exterior ring for simplicity
-        if (geometry.coordinates[0] && geometry.coordinates[0][0]) {
-          geometry.coordinates[0][0].forEach((coord) =>
-            coordinates.push(coord),
-          );
-        }
-        break;
+      }
     }
 
     return coordinates;
@@ -2227,52 +2577,33 @@
     }
 
     const geometry = feature.geometry;
+    const nextCoordinate = normaliseCoordinate(newCoord);
 
     switch (geometry.type) {
       case "Point":
         if (index === 0) {
-          geometry.coordinates = newCoord;
+          geometry.coordinates = nextCoordinate;
         }
         break;
-      case "LineString":
-        if (geometry.coordinates[index]) {
-          geometry.coordinates[index] = newCoord;
+      default: {
+        const pathDetails = getEditableCoordinatePath(geometry);
+        const vertexCount = getEditableVertexCount(pathDetails);
+        if (!pathDetails || !Array.isArray(pathDetails.path)) {
+          return;
+        }
+
+        if (index < 0 || index >= vertexCount) {
+          return;
+        }
+
+        pathDetails.path[index] = nextCoordinate;
+        if (pathDetails.closed && pathDetails.path.length > 1) {
+          pathDetails.path[pathDetails.path.length - 1] = [
+            ...pathDetails.path[0],
+          ];
         }
         break;
-      case "Polygon":
-        if (geometry.coordinates[0] && geometry.coordinates[0][index]) {
-          geometry.coordinates[0][index] = newCoord;
-          // For polygons, if we're updating the first coordinate, also update the last to keep it closed
-          if (index === 0 && geometry.coordinates[0].length > 3) {
-            geometry.coordinates[0][geometry.coordinates[0].length - 1] =
-              newCoord;
-          }
-        }
-        break;
-      case "MultiPoint":
-        if (geometry.coordinates[index]) {
-          geometry.coordinates[index] = newCoord;
-        }
-        break;
-      case "MultiLineString":
-        if (geometry.coordinates[0] && geometry.coordinates[0][index]) {
-          geometry.coordinates[0][index] = newCoord;
-        }
-        break;
-      case "MultiPolygon":
-        if (
-          geometry.coordinates[0] &&
-          geometry.coordinates[0][0] &&
-          geometry.coordinates[0][0][index]
-        ) {
-          geometry.coordinates[0][0][index] = newCoord;
-          // For polygons, if we're updating the first coordinate, also update the last to keep it closed
-          if (index === 0 && geometry.coordinates[0][0].length > 3) {
-            geometry.coordinates[0][0][geometry.coordinates[0][0].length - 1] =
-              newCoord;
-          }
-        }
-        break;
+      }
     }
   }
 
