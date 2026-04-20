@@ -31,6 +31,13 @@ The custom editor is registered as the default editor for supported GeoJSON file
 - Numeric gradient styling with presets and custom gradients.
 - Opacity by numeric field using configurable min/max transparency.
 
+### Labels
+
+- Turn on/off map labels using the new **Labels** panel in the right sidebar.
+- Choose a `Label field` from available feature properties; the control is disabled until a suitable property exists.
+- Labels are rendered for points, along lines, and within polygon centroids where possible. They use a subtle halo and high-contrast text to remain readable over basemaps and are sized responsively by zoom level.
+- A small preview card shows an example label value and hints when no values are available.
+
 ### Feature and property editing
 
 - Add new features from the sidebar:
@@ -77,6 +84,8 @@ The custom editor is registered as the default editor for supported GeoJSON file
 
 5. Edit raw document data directly if needed.
 6. Click **Apply Changes** to save updates to disk.
+
+7. To enable labels: open the **Labels** panel, choose a `Label field`, then enable `Show labels`.
 
 ## Requirements
 

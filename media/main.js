@@ -3,6 +3,10 @@
   const textArea = document.getElementById("geojson-input");
   const highlightLayer = document.getElementById("geojson-highlight");
   const attributeSelect = document.getElementById("attribute-select");
+  const labelToggleInput = document.getElementById("label-toggle-input");
+  const labelFieldSelect = document.getElementById("label-field-select");
+  const labelPreviewValue = document.getElementById("label-preview-value");
+  const labelPreviewMeta = document.getElementById("label-preview-meta");
   const applyButton = document.getElementById("apply-btn");
   const statusNode = document.getElementById("status");
   const propertiesContainer = document.getElementById("properties-container");
@@ -109,6 +113,11 @@
     "geojson-line",
     "geojson-point",
   ];
+  const labelLayerIds = [
+    "geojson-point-label",
+    "geojson-line-label",
+    "geojson-area-label",
+  ];
   const emptyCollection = { type: "FeatureCollection", features: [] };
   const basemapStyles = {
     "carto-positron":
@@ -174,6 +183,8 @@
     opacityAttribute: "",
     minTransparency: 10,
     maxTransparency: 80,
+    labelsEnabled: false,
+    labelField: "",
   };
 
   document.addEventListener("DOMContentLoaded", () => {
@@ -257,6 +268,22 @@
   if (roundCoordinatesButton) {
     roundCoordinatesButton.addEventListener("click", () => {
       roundCurrentCoordinates();
+    });
+  }
+
+  if (labelToggleInput) {
+    labelToggleInput.addEventListener("change", () => {
+      styleState.labelsEnabled = labelToggleInput.checked;
+      updateLabelControls();
+      applyLabels();
+    });
+  }
+
+  if (labelFieldSelect) {
+    labelFieldSelect.addEventListener("change", () => {
+      styleState.labelField = labelFieldSelect.value;
+      updateLabelControls();
+      applyLabels();
     });
   }
 
@@ -400,6 +427,7 @@
   updateStyleControlAvailability(emptyCollection);
   updateAttributeColouringControls();
   updateOpacityControls();
+  updateLabelControls();
   initialiseCollapsibleSections();
 
   addPropertyButton.addEventListener("click", () => {
@@ -531,6 +559,7 @@
       const data = currentGeoJson || emptyCollection;
       updateMap(data);
       applyColouring(attributeSelect.value);
+      applyLabels();
       updateStyleControlAvailability(data);
       updateDocumentMetrics();
       setLoading(false);
@@ -953,6 +982,7 @@
     populateAttributeOptions(collection);
     updateStyleControlAvailability(collection);
     applyColouring(attributeSelect.value);
+    applyLabels();
     updateAddFeatureButtonsState();
     const statusMessage = notice ? `${message} ${notice}` : message;
     setStatus(
@@ -1030,6 +1060,7 @@
       populateAttributeOptions(collection);
       updateStyleControlAvailability(collection);
       applyColouring(attributeSelect.value);
+      applyLabels();
       if (!getSelectedFeature()) {
         clearSelection();
       } else {
@@ -1169,6 +1200,126 @@
         filter: ["==", ["get", "__editorIndex"], -1],
       });
 
+      map.addLayer({
+        id: "geojson-point-label",
+        type: "symbol",
+        source: sourceId,
+        layout: {
+          "text-field": "",
+          "text-font": ["Open Sans Semibold", "Arial Unicode MS Bold"],
+          "text-size": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            3,
+            11,
+            9,
+            13,
+            13,
+            16,
+          ],
+          "text-letter-spacing": 0.02,
+          "text-variable-anchor": ["top", "bottom", "left", "right"],
+          "text-radial-offset": 0.75,
+          "text-padding": 6,
+          visibility: "none",
+        },
+        paint: {
+          "text-color": "#f8fafc",
+          "text-halo-color": "rgba(15, 23, 42, 0.92)",
+          "text-halo-width": 2,
+          "text-halo-blur": 0.8,
+          "text-opacity": 0.96,
+        },
+        filter: [
+          "match",
+          ["geometry-type"],
+          ["Point", "MultiPoint"],
+          true,
+          false,
+        ],
+      });
+
+      map.addLayer({
+        id: "geojson-line-label",
+        type: "symbol",
+        source: sourceId,
+        layout: {
+          "symbol-placement": "line",
+          "text-field": "",
+          "text-font": ["Open Sans Semibold", "Arial Unicode MS Bold"],
+          "text-size": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            4,
+            10,
+            9,
+            12,
+            12,
+            15,
+          ],
+          "text-letter-spacing": 0.06,
+          "symbol-spacing": 420,
+          "text-keep-upright": true,
+          "text-padding": 4,
+          visibility: "none",
+        },
+        paint: {
+          "text-color": "#f8fafc",
+          "text-halo-color": "rgba(15, 23, 42, 0.95)",
+          "text-halo-width": 2,
+          "text-halo-blur": 0.9,
+          "text-opacity": 0.94,
+        },
+        filter: [
+          "match",
+          ["geometry-type"],
+          ["LineString", "MultiLineString"],
+          true,
+          false,
+        ],
+      });
+
+      map.addLayer({
+        id: "geojson-area-label",
+        type: "symbol",
+        source: sourceId,
+        layout: {
+          "text-field": "",
+          "text-font": ["Open Sans Semibold", "Arial Unicode MS Bold"],
+          "text-size": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            3,
+            11,
+            8,
+            13,
+            12,
+            17,
+          ],
+          "text-max-width": 9,
+          "text-line-height": 1.1,
+          "text-padding": 8,
+          visibility: "none",
+        },
+        paint: {
+          "text-color": "#f8fafc",
+          "text-halo-color": "rgba(15, 23, 42, 0.94)",
+          "text-halo-width": 2.25,
+          "text-halo-blur": 1,
+          "text-opacity": 0.96,
+        },
+        filter: [
+          "match",
+          ["geometry-type"],
+          ["Polygon", "MultiPolygon"],
+          true,
+          false,
+        ],
+      });
+
       safeMoveLayer("geojson-highlight-fill", "geojson-outline");
       safeMoveLayer("geojson-highlight-line", "geojson-line");
       safeMoveLayer("geojson-highlight-point", "geojson-point");
@@ -1186,6 +1337,7 @@
       hideHoverTooltip();
     }
     refreshSelectionHighlight();
+    applyLabels();
   }
 
   function buildHoverTooltipHtml(renderedFeature) {
@@ -1351,9 +1503,40 @@
       attributeSelect.value = "";
     }
 
+    populateLabelFieldOptions(attributes);
     populateOpacityAttributeOptions(features);
 
     updateAttributeColouringControls();
+  }
+
+  function populateLabelFieldOptions(attributes) {
+    if (!labelFieldSelect) {
+      return;
+    }
+
+    const currentSelection = styleState.labelField;
+    labelFieldSelect.innerHTML = "";
+
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Choose a field";
+    labelFieldSelect.appendChild(defaultOption);
+
+    for (const key of Array.from(attributes).sort()) {
+      const option = document.createElement("option");
+      option.value = key;
+      option.textContent = key;
+      labelFieldSelect.appendChild(option);
+    }
+
+    if (attributes.has(currentSelection)) {
+      styleState.labelField = currentSelection;
+    } else {
+      styleState.labelField = "";
+      styleState.labelsEnabled = false;
+    }
+
+    updateLabelControls();
   }
 
   function populateOpacityAttributeOptions(features) {
@@ -1696,6 +1879,123 @@
     syncStyleInputs();
   }
 
+  function updateLabelControls() {
+    const hasFields = Boolean(
+      labelFieldSelect && labelFieldSelect.options.length > 1,
+    );
+    const hasSelectedField = Boolean(styleState.labelField);
+
+    if (!hasSelectedField) {
+      styleState.labelsEnabled = false;
+    }
+
+    if (labelFieldSelect) {
+      labelFieldSelect.disabled = !hasFields;
+      labelFieldSelect.value = styleState.labelField;
+      if (!hasFields) {
+        labelFieldSelect.setAttribute(
+          "title",
+          "Add a string, number, or boolean property to enable labels.",
+        );
+      } else {
+        labelFieldSelect.removeAttribute("title");
+      }
+    }
+
+    if (labelToggleInput) {
+      labelToggleInput.disabled = !hasSelectedField;
+      labelToggleInput.checked = hasSelectedField && styleState.labelsEnabled;
+      if (!hasSelectedField) {
+        labelToggleInput.setAttribute(
+          "title",
+          hasFields
+            ? "Choose a label field first."
+            : "No label fields are available yet.",
+        );
+      } else {
+        labelToggleInput.removeAttribute("title");
+      }
+    }
+
+    updateLabelPreview();
+  }
+
+  function updateLabelPreview() {
+    if (!labelPreviewValue || !labelPreviewMeta) {
+      return;
+    }
+
+    if (!styleState.labelField) {
+      labelPreviewValue.textContent = "Labels are off";
+      labelPreviewMeta.textContent = labelFieldSelect?.disabled
+        ? "Add a property to a feature to make label fields available"
+        : "Choose a property to preview your map labels";
+      return;
+    }
+
+    const previewValue = getLabelPreviewValue(styleState.labelField);
+    if (!styleState.labelsEnabled) {
+      labelPreviewValue.textContent = previewValue || styleState.labelField;
+      labelPreviewMeta.textContent = `Enable labels to show "${styleState.labelField}" on the map.`;
+      return;
+    }
+
+    labelPreviewValue.textContent = previewValue || styleState.labelField;
+    labelPreviewMeta.textContent = `Showing "${styleState.labelField}" with dynamic placement and halo styling.`;
+  }
+
+  function getLabelPreviewValue(field) {
+    const features = collectFeatures(currentGeoJson);
+    for (const feature of features) {
+      const properties = sanitizeProperties(feature.properties);
+      if (!Object.prototype.hasOwnProperty.call(properties, field)) {
+        continue;
+      }
+
+      const rawValue = properties[field];
+      if (rawValue === null || typeof rawValue === "undefined") {
+        continue;
+      }
+
+      const preview = formatTooltipValue(rawValue).trim();
+      if (!preview.length) {
+        continue;
+      }
+
+      return preview.length > 36 ? `${preview.slice(0, 33)}...` : preview;
+    }
+
+    return "No label values yet";
+  }
+
+  function applyLabels() {
+    updateLabelPreview();
+
+    if (!mapReady) {
+      return;
+    }
+
+    const shouldShow = Boolean(
+      styleState.labelsEnabled && styleState.labelField,
+    );
+    const labelExpression = shouldShow
+      ? ["to-string", ["coalesce", ["get", styleState.labelField], ""]]
+      : "";
+
+    labelLayerIds.forEach((layerId) => {
+      if (!map.getLayer(layerId)) {
+        return;
+      }
+
+      map.setLayoutProperty(
+        layerId,
+        "visibility",
+        shouldShow ? "visible" : "none",
+      );
+      map.setLayoutProperty(layerId, "text-field", labelExpression);
+    });
+  }
+
   function applyGradientPreset(presetKey) {
     const preset = gradientPresets[presetKey];
     if (!preset) {
@@ -1837,6 +2137,7 @@
       populateAttributeOptions(collection);
       updateStyleControlAvailability(collection);
       applyColouring(attributeSelect.value);
+      applyLabels();
       refreshSelectionState();
       updateDocumentMetrics();
 
@@ -2005,7 +2306,7 @@
     }
 
     if (subtitle) {
-      subtitle.textContent = "Inspect, style, and edit your spatial data.";
+      subtitle.textContent = "Inspect, style, and edit geojson files";
     }
 
     textArea.removeAttribute("title");

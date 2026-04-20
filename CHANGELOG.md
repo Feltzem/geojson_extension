@@ -20,8 +20,11 @@ All notable changes to the "geojson-visual-editor" extension will be documented 
 - Now respects the current VS Code theme (not always dark)
 - Basemap selector with three Carto styles: Positron, Voyager, Dark Matter
 - Round latitude and longitude fields
-- Removed WKT functionality (coming back in a later update)
 
 ## [0.4.0] - 2026-04-19
 
 - Vertex editing enhancements: add and delete vertices while editing a selected feature. Left-click near a line segment or polygon edge to insert a vertex; right-click an existing vertex (or its marker) to delete it. Vertex markers remain draggable and the cursor switches to a crosshair while editing. Polygon rings are kept closed automatically and deletions that would produce invalid geometry are blocked.
+
+## [0.5.0] - 2026-04-20
+
+- Labeling: Add a Labels sidebar to toggle on/off map labels and select a feature property to use as the label text. Labels support points, lines and polygon centroids, use halo styling for contrast, and are sized responsively by zoom. The sidebar includes a small live preview and disables controls when no suitable property is available.

@@ -191,7 +191,7 @@ class GeoJsonEditorProvider {
 				<section class="side-panel">
 					<header class="panel-header">
 						<h1>GeoJSON Visual Editor</h1>
-            <p class="subtitle">Inspect, style, and edit your spatial data.</p>
+            <p class="subtitle">Inspect, style, and edit geojson files</p>
             <div class="document-metrics" aria-live="polite">
               <span id="feature-count-indicator" class="metric-pill">Features: 0</span>
               <span id="file-size-indicator" class="metric-pill">Size: 0 B</span>
@@ -228,7 +228,7 @@ class GeoJsonEditorProvider {
               </button>
             </header>
             <div id="geometry-styling-content" class="collapsible-content">
-              <p>Set shared fill and optional stroke styling for the map preview.</p>
+              <p>Set shared fill and optional stroke styling for the map preview</p>
               <div class="style-row">
                 <label for="fill-colour-input">Fill colour</label>
                 <input id="fill-colour-input" type="color" value="#2563eb" />
@@ -312,6 +312,38 @@ class GeoJsonEditorProvider {
           </section>
           <section class="properties-group collapsible-section" aria-live="polite">
             <header class="group-header collapsible-header">
+              <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="labels-content">
+                <span class="caret" aria-hidden="true">▾</span>
+                <span>Labels</span>
+              </button>
+            </header>
+            <div id="labels-content" class="collapsible-content">
+              <p>Label features from an attribute</p>
+              <div class="label-card">
+                <label for="label-toggle-input" class="label-toggle-row">
+                  <span class="toggle-copy">
+                    <span class="toggle-title">Show labels</span>
+                  </span>
+                  <input id="label-toggle-input" type="checkbox" />
+                </label>
+                <div class="control-group">
+                  <label for="label-field-select">Label field</label>
+                  <select id="label-field-select">
+                    <option value="">Choose a field</option>
+                  </select>
+                </div>
+                <div class="label-preview" aria-live="polite">
+                  <span class="label-preview-chip" aria-hidden="true">Aa</span>
+                  <div class="label-preview-copy">
+                    <strong id="label-preview-value">Labels are off</strong>
+                    <span id="label-preview-meta">Choose a property to preview your map labels.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="properties-group collapsible-section" aria-live="polite">
+            <header class="group-header collapsible-header">
               <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="new-features-content">
                 <span class="caret" aria-hidden="true">▾</span>
                 <span>New Features</span>
@@ -333,7 +365,7 @@ class GeoJsonEditorProvider {
               </button>
             </header>
             <div id="feature-properties-content" class="collapsible-content">
-              <p id="selection-hint">Select a feature on the map to edit its properties.</p>
+              <p id="selection-hint">Select a feature on the map to edit its properties</p>
               <div id="properties-container" class="properties-container" role="group" aria-describedby="selection-hint"></div>
               <div class="property-actions">
                 <button id="add-property-btn" type="button">Add property</button>
