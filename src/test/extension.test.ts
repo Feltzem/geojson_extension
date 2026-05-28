@@ -19,14 +19,19 @@ suite("GeoJSON Visual Editor", () => {
     });
   });
 
-  test("reports invalid JSON while sending safe fallback content", () => {
+  test("preserves raw document text for the webview", () => {
+    const rawText = '{"type":"FeatureCollection","features":[]}';
+    const payload = toWebviewPayload(rawText);
+
+    assert.strictEqual(payload.error, undefined);
+    assert.strictEqual(payload.text, rawText);
+  });
+
+  test("passes invalid JSON through for webview-side reporting", () => {
     const payload = toWebviewPayload("{ invalid");
 
-    assert.ok(payload.error);
-    assert.deepStrictEqual(JSON.parse(payload.text), {
-      type: "FeatureCollection",
-      features: [],
-    });
+    assert.strictEqual(payload.error, undefined);
+    assert.strictEqual(payload.text, "{ invalid");
   });
 
   test("normalises edited webview JSON before persisting", () => {

@@ -2,8 +2,9 @@
   "name": "geojson-visual-editor",
   "displayName": "GeoJSON Visual Editor",
   "description": "Open, edit, and visualize GeoJSON data",
+  "icon": "media/icon.png",
   "publisher": "feltzem",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "repository": {
     "type": "git",
     "url": "https://github.com/Feltzem/geojson_extension.git"

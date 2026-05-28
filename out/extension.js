@@ -68,20 +68,10 @@ exports.DEFAULT_EDITOR_SETTINGS = {
     defaultLabelSize: 12,
 };
 function toWebviewPayload(rawText) {
-    try {
-        if (!rawText.trim().length) {
-            return { text: EMPTY_COLLECTION_JSON };
-        }
-        const parsed = JSON.parse(rawText);
-        return { text: JSON.stringify(parsed, null, 2) };
+    if (!rawText.trim().length) {
+        return { text: EMPTY_COLLECTION_JSON };
     }
-    catch (error) {
-        const message = error instanceof Error ? error.message : "Invalid GeoJSON document.";
-        return {
-            text: EMPTY_COLLECTION_JSON,
-            error: message,
-        };
-    }
+    return { text: rawText };
 }
 function fromWebviewText(webviewText) {
     try {
@@ -263,6 +253,29 @@ class GeoJsonEditorProvider {
 		</head>
 		<body>
 			<div class="app">
+        <div id="large-file-loading" class="large-file-loading hidden" role="status" aria-live="polite" aria-busy="true" aria-hidden="true">
+          <div class="large-file-loading-panel">
+            <div class="large-file-loading-kicker">Large document</div>
+            <div class="large-file-loading-header">
+              <h2 id="large-file-loading-title">Loading GeoJSON</h2>
+              <span id="large-file-loading-percent">0%</span>
+            </div>
+            <div id="large-file-loading-step" class="large-file-loading-step">Preparing map workspace</div>
+            <div class="large-file-loading-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Loading progress">
+              <span id="large-file-loading-bar"></span>
+            </div>
+            <div id="large-file-loading-detail" class="large-file-loading-detail">Switching the raw editor to high-performance mode.</div>
+          </div>
+        </div>
+        <div id="raw-data-popup" class="raw-data-popup hidden" role="status" aria-live="polite" aria-hidden="true">
+          <div class="raw-data-popup-panel">
+            <div class="raw-data-popup-copy">
+              <strong id="raw-data-popup-title">Raw document data shown</strong>
+              <span id="raw-data-popup-message">Showing the original text because the document cannot be safely formatted.</span>
+            </div>
+            <button id="raw-data-popup-close" type="button" class="raw-data-popup-close" aria-label="Dismiss raw document notice">Dismiss</button>
+          </div>
+        </div>
 				<section class="map-panel" aria-label="Map preview">
           <div id="map"></div>
           <div id="graticule-overlay" class="graticule-overlay" aria-hidden="true"></div>

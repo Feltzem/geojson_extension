@@ -38,3 +38,10 @@ All notable changes to the "geojson-visual-editor" extension will be documented 
 
 - Settings: Add VS Code user/workspace settings for the visual editor UI scale, default basemap, default fill and stroke colours, default line and stroke widths, and default map label font/size.
 - Settings now apply when opening a GeoJSON file and update live in open editors when changed through VS Code Settings or `settings.json`, while keeping `.geojson` files free of editor preference metadata.
+
+## [0.6.3] - 2026-05-28
+
+- Performance: Improve large GeoJSON loading by preserving raw text for large files, skipping expensive full-document syntax highlighting and gutter generation, caching feature analysis, and avoiding unnecessary geometry cloning.
+- Loading: Add a polished large-document loading screen with staged progress while parsing, scanning features, rendering map layers, and syncing editor controls.
+- Document editor: Keep pretty-printed JSON formatting and syntax highlighting for smaller files while using a fast plain-text editor mode for large documents.
+- Development: Package VSIX builds into an ignored `dist/` folder.

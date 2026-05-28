@@ -19,6 +19,7 @@
   const applyButton = document.getElementById("apply-btn");
   const statusNode = document.getElementById("status");
   const propertiesContainer = document.getElementById("properties-container");
+  const jsonEditor = document.querySelector(".json-editor");
   const addPropertyButton = document.getElementById("add-property-btn");
   const editVerticesButton = document.getElementById("edit-vertices-btn");
   const snapVerticesButton = document.getElementById("snap-vertices-btn");
@@ -27,6 +28,30 @@
   const addLineButton = document.getElementById("add-linestring-btn");
   const addPolygonButton = document.getElementById("add-polygon-btn");
   const loadingIndicator = document.getElementById("loading-indicator");
+  const largeFileLoading = document.getElementById("large-file-loading");
+  const largeFileLoadingPercent = document.getElementById(
+    "large-file-loading-percent",
+  );
+  const largeFileLoadingStep = document.getElementById(
+    "large-file-loading-step",
+  );
+  const largeFileLoadingDetail = document.getElementById(
+    "large-file-loading-detail",
+  );
+  const largeFileLoadingProgress = largeFileLoading?.querySelector(
+    ".large-file-loading-progress",
+  );
+  const largeFileLoadingBar = document.getElementById(
+    "large-file-loading-bar",
+  );
+  const rawDataPopup = document.getElementById("raw-data-popup");
+  const rawDataPopupTitle = document.getElementById("raw-data-popup-title");
+  const rawDataPopupMessage = document.getElementById(
+    "raw-data-popup-message",
+  );
+  const rawDataPopupCloseButton = document.getElementById(
+    "raw-data-popup-close",
+  );
   const rawLabel = document.getElementById("raw-label");
   const rawSearchToggleButton = document.getElementById(
     "raw-search-toggle-btn",
@@ -168,6 +193,10 @@
     "Arial Unicode MS Regular",
     "Arial Unicode MS Bold",
   ];
+  const largeRawEditorThresholds = {
+    characters: 2_000_000,
+    lines: 50_000,
+  };
   const defaultEditorSettings = {
     uiScale: 1,
     defaultBasemap: "carto-positron",
@@ -190,7 +219,6 @@
     clampNumber,
     coerceValue,
     collectFeatures,
-    fitToDataBounds,
     normaliseColour,
     normaliseGeoJson,
     normaliseLongitude,
@@ -201,9 +229,11 @@
 
   let currentText = "";
   let currentGeoJson = null;
+  let documentAnalysis = createEmptyDocumentAnalysis();
   let map;
   let mapReady = false;
   let pendingUpdate = null;
+  let loadRequestId = 0;
   let selectedFeatureIndex = null;
   let pendingFocusKey = null;
   let mapHasData = false;
@@ -220,6 +250,9 @@
   let instrumentUpdateFrame = null;
   let themeUpdateFrame = null;
   let rawTextMeasureCanvas = null;
+  let rawEditorLargeMode = false;
+  let activeRawDataPopupReason = "";
+  let dismissedRawDataPopupReason = "";
   let toolbarDragState = null;
   const maxVertexInsertDistancePx = 24;
   const maxVertexDeleteDistancePx = 16;
@@ -277,10 +310,7 @@
       if (text !== currentText) {
         currentText = text;
       }
-      loadTextIntoEditor(text);
-      if (message.error) {
-        setStatus(message.error, "error");
-      }
+      void loadTextIntoEditor(text, message.error);
       return;
     }
 
@@ -289,6 +319,13 @@
       return;
     }
   });
+
+  if (rawDataPopupCloseButton) {
+    rawDataPopupCloseButton.addEventListener("click", () => {
+      dismissedRawDataPopupReason = activeRawDataPopupReason;
+      hideRawDataPopup();
+    });
+  }
 
   function initialiseCustomSelects() {
     document.querySelectorAll("select").forEach((select) => {
@@ -578,11 +615,12 @@
       const { collection, notice } = enforceFormatConstraints(rounded);
       const serialised = JSON.stringify(collection, null, 2);
       currentText = serialised;
-      currentGeoJson = collection;
+      setCurrentGeoJson(collection);
       setEditorText(serialised);
       updateMap(collection);
       populateAttributeOptions(collection);
       applyColouring(attributeSelect.value);
+      applyLabels();
       refreshSelectionState();
       updateAddFeatureButtonsState();
       setStatus("Changes applied locally. Saving...", "");
@@ -950,6 +988,9 @@
         pendingUpdate = null;
         updateMap(data, options);
       }
+      applyColouring(attributeSelect.value);
+      applyLabels();
+      updateStyleControlAvailability(currentGeoJson || emptyCollection);
       updateDocumentMetrics();
       updateMapInstruments();
     });
@@ -1377,17 +1418,15 @@
   }
 
   function fitCurrentDataToMap() {
-    if (!currentGeoJson || !collectFeatures(currentGeoJson).length) {
+    if (!documentAnalysis.featureCount) {
       setStatus("No features available to fit.", "");
       return;
     }
-    fitToDataBounds(map, currentGeoJson);
+    fitMapToAnalysedBounds();
   }
 
   function updateMapToolbarState() {
-    const hasFeatures = Boolean(
-      currentGeoJson && collectFeatures(currentGeoJson).length,
-    );
+    const hasFeatures = documentAnalysis.featureCount > 0;
     if (mapZoomInButton) {
       mapZoomInButton.disabled = !mapReady;
     }
@@ -1971,7 +2010,7 @@
 
     const rounded = roundFeatureCollection(currentGeoJson, coordinatePrecision);
     const { collection, notice } = enforceFormatConstraints(rounded);
-    currentGeoJson = collection;
+    setCurrentGeoJson(collection);
     const serialised = JSON.stringify(collection, null, 2);
     currentText = serialised;
     setEditorText(serialised);
@@ -2024,16 +2063,53 @@
     return feature;
   }
 
-  function loadTextIntoEditor(text) {
-    setLoading(true);
+  function setCurrentGeoJson(collection, analysis = null) {
+    currentGeoJson = collection;
+    documentAnalysis = analysis || analyseFeatureCollection(collection);
+  }
+
+  async function loadTextIntoEditor(text, externalError = null) {
+    const requestId = ++loadRequestId;
+    const isLargeLoad = isLargeRawDocument(text);
+    if (isLargeLoad) {
+      hideMapLoading();
+      showLargeFileLoading(
+        3,
+        "Preparing large-file workspace",
+        `${formatBytes(text.length)} file detected. Enabling plain raw editor mode.`,
+      );
+      showRawDataPopup(
+        "large-document",
+        "Raw document data shown",
+        `${formatBytes(text.length)} document detected. Formatting is skipped to keep editing responsive.`,
+      );
+    } else {
+      hideLargeFileLoading();
+      setLoading(true);
+    }
+
+    await nextAnimationFrame();
+    if (requestId !== loadRequestId) {
+      return;
+    }
+
+    if (isLargeLoad) {
+      updateLargeFileLoading(
+        12,
+        "Preparing raw editor",
+        "Keeping the document editable while skipping expensive syntax highlighting.",
+      );
+    }
     setEditorText(text);
     currentText = text;
+
     if (!text) {
-      currentGeoJson = null;
+      setCurrentGeoJson(null);
       clearSelection();
       updateMap(emptyCollection);
       populateAttributeOptions(emptyCollection);
       updateStyleControlAvailability(emptyCollection);
+      hideRawDataPopup({ resetDismissed: true });
       clearStatus();
       setLoading(false);
       updateAddFeatureButtonsState();
@@ -2042,19 +2118,65 @@
     }
 
     try {
+      if (isLargeLoad) {
+        updateLargeFileLoading(
+          24,
+          "Parsing GeoJSON",
+          "Reading features and geometry from the document.",
+        );
+        await nextAnimationFrame();
+      }
       const parsed = JSON.parse(text);
       const normalised = normaliseGeoJson(parsed);
       if (!normalised) {
         throw new Error("Unsupported GeoJSON structure.");
       }
-      const rounded = roundFeatureCollection(normalised, coordinatePrecision);
-      const { collection, notice } = enforceFormatConstraints(rounded);
-      const serialised = JSON.stringify(collection, null, 2);
-      currentGeoJson = collection;
-      currentText = serialised;
-      setEditorText(serialised);
+      const { collection, notice } = enforceFormatConstraints(normalised);
+
+      let analysis = null;
+      if (isLargeLoad) {
+        analysis = await analyseFeatureCollectionAsync(
+          collection,
+          ({ progress, processed, total }) => {
+            updateLargeFileLoading(
+              32 + progress * 0.34,
+              "Scanning features",
+              `Analysed ${processed.toLocaleString()} of ${total.toLocaleString()} features.`,
+            );
+          },
+          () => requestId !== loadRequestId,
+        );
+        if (requestId !== loadRequestId) {
+          return;
+        }
+      }
+
+      if (!isLargeLoad) {
+        const serialised = JSON.stringify(collection, null, 2);
+        currentText = serialised;
+        setEditorText(serialised);
+        hideRawDataPopup({ resetDismissed: true });
+      }
+
+      setCurrentGeoJson(collection, analysis);
       const shouldForceFit = !hasFitOnce;
+      if (isLargeLoad) {
+        updateLargeFileLoading(
+          72,
+          "Rendering map layers",
+          `${documentAnalysis.featureCount.toLocaleString()} features ready for MapLibre.`,
+        );
+        await nextAnimationFrame();
+      }
       updateMap(collection, { forceFit: shouldForceFit });
+      if (isLargeLoad) {
+        updateLargeFileLoading(
+          86,
+          "Syncing controls",
+          "Building attribute, label, and styling controls from the cached scan.",
+        );
+        await nextAnimationFrame();
+      }
       populateAttributeOptions(collection);
       updateStyleControlAvailability(collection);
       applyColouring(attributeSelect.value);
@@ -2064,19 +2186,52 @@
       } else {
         refreshSelectionState();
       }
-      if (notice) {
+      if (externalError) {
+        setStatus(externalError, "error");
+      } else if (notice) {
         setStatus(notice, "");
       } else {
         clearStatus();
       }
+      if (isLargeLoad) {
+        updateLargeFileLoading(
+          100,
+          "Ready",
+          `Loaded ${documentAnalysis.featureCount.toLocaleString()} features in large-file mode.`,
+        );
+        await nextAnimationFrame();
+      }
       updateDocumentMetrics();
     } catch (error) {
-      setStatus(formatError(error), "error");
+      const errorMessage = formatError(error);
+      setCurrentGeoJson(null);
+      clearSelection();
+      updateMap(emptyCollection);
+      populateAttributeOptions(emptyCollection);
+      updateStyleControlAvailability(emptyCollection);
+      setStatus(errorMessage, "error");
+      showRawDataPopup(
+        "format-error",
+        "Raw document data shown",
+        "The document could not be formatted as supported GeoJSON, so the original text is shown for editing.",
+      );
     } finally {
-      setLoading(false);
-      updateAddFeatureButtonsState();
-      updateDocumentMetrics();
+      if (requestId === loadRequestId) {
+        if (isLargeLoad) {
+          hideLargeFileLoading();
+        } else {
+          setLoading(false);
+        }
+        updateAddFeatureButtonsState();
+        updateDocumentMetrics();
+      }
     }
+  }
+
+  function nextAnimationFrame() {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
   }
 
   function updateMap(data, options = {}) {
@@ -2298,7 +2453,7 @@
 
     const shouldFit = (!mapHasData && hasFeatures) || (forceFit && hasFeatures);
     if (shouldFit) {
-      fitToDataBounds(map, prepared);
+      fitMapToAnalysedBounds();
       hasFitOnce = true;
     }
 
@@ -2308,7 +2463,6 @@
       hideHoverTooltip();
     }
     refreshSelectionHighlight();
-    applyLabels();
     updateMapToolbarState();
     scheduleInstrumentUpdate();
   }
@@ -2412,6 +2566,269 @@
     });
   }
 
+  function createEmptyDocumentAnalysis() {
+    return {
+      featureCount: 0,
+      bounds: null,
+      attributes: new Set(),
+      numericAttributes: new Set(),
+      numericRanges: new Map(),
+      hasLineGeometry: false,
+      labelPreviewValues: new Map(),
+    };
+  }
+
+  function analyseFeatureCollection(data) {
+    const builder = createDocumentAnalysisBuilder(data);
+    if (!builder) {
+      return createEmptyDocumentAnalysis();
+    }
+
+    while (builder.index < builder.features.length) {
+      processAnalysisFeature(builder, builder.features[builder.index]);
+      builder.index += 1;
+    }
+
+    return finalizeDocumentAnalysis(builder);
+  }
+
+  async function analyseFeatureCollectionAsync(
+    data,
+    onProgress,
+    shouldCancel,
+  ) {
+    const builder = createDocumentAnalysisBuilder(data);
+    if (!builder) {
+      return createEmptyDocumentAnalysis();
+    }
+
+    const total = builder.features.length;
+    const chunkSize = Math.max(250, Math.ceil(Math.max(total, 1) / 40));
+
+    while (builder.index < total) {
+      if (shouldCancel?.()) {
+        return null;
+      }
+
+      const endIndex = Math.min(total, builder.index + chunkSize);
+      for (; builder.index < endIndex; builder.index += 1) {
+        processAnalysisFeature(builder, builder.features[builder.index]);
+      }
+
+      onProgress?.({
+        progress: total ? (builder.index / total) * 100 : 100,
+        processed: builder.index,
+        total,
+      });
+
+      await nextAnimationFrame();
+    }
+
+    return finalizeDocumentAnalysis(builder);
+  }
+
+  function createDocumentAnalysisBuilder(data) {
+    const collection = normaliseGeoJson(data);
+    if (!collection) {
+      return null;
+    }
+
+    const features = Array.isArray(collection.features)
+      ? collection.features
+      : [];
+
+    return {
+      features,
+      index: 0,
+      analysis: {
+        ...createEmptyDocumentAnalysis(),
+        featureCount: features.length,
+      },
+      numericStats: new Map(),
+      bounds: {
+        minX: Infinity,
+        minY: Infinity,
+        maxX: -Infinity,
+        maxY: -Infinity,
+      },
+      hasBounds: false,
+    };
+  }
+
+  function processAnalysisFeature(builder, feature) {
+    const { analysis, numericStats, bounds } = builder;
+    const geometry = feature?.geometry;
+    if (geometry) {
+      if (containsLineGeometryType(geometry)) {
+        analysis.hasLineGeometry = true;
+      }
+      builder.hasBounds =
+        extendBoundsForGeometry(geometry, bounds) || builder.hasBounds;
+    }
+
+    const properties =
+      feature?.properties && typeof feature.properties === "object"
+        ? feature.properties
+        : {};
+
+    for (const key of Object.keys(properties)) {
+      if (key === "__editorIndex") {
+        continue;
+      }
+
+      const value = properties[key];
+      if (value === null || typeof value === "undefined") {
+        continue;
+      }
+
+      const valueType = typeof value;
+      if (
+        valueType === "string" ||
+        valueType === "number" ||
+        valueType === "boolean"
+      ) {
+        analysis.attributes.add(key);
+        if (!analysis.labelPreviewValues.has(key)) {
+          const preview = formatTooltipValue(value).trim();
+          if (preview.length) {
+            analysis.labelPreviewValues.set(
+              key,
+              preview.length > 36 ? `${preview.slice(0, 33)}...` : preview,
+            );
+          }
+        }
+      }
+
+      if (!numericStats.has(key)) {
+        numericStats.set(key, {
+          hasNumber: false,
+          hasNonNumber: false,
+          min: Infinity,
+          max: -Infinity,
+        });
+      }
+
+      const stats = numericStats.get(key);
+      if (valueType === "number" && Number.isFinite(value)) {
+        stats.hasNumber = true;
+        stats.min = Math.min(stats.min, value);
+        stats.max = Math.max(stats.max, value);
+      } else {
+        stats.hasNonNumber = true;
+      }
+    }
+  }
+
+  function finalizeDocumentAnalysis(builder) {
+    const { analysis, numericStats, bounds } = builder;
+
+    if (builder.hasBounds) {
+      analysis.bounds = bounds;
+    }
+
+    for (const [key, stats] of numericStats.entries()) {
+      if (stats.hasNumber && !stats.hasNonNumber) {
+        analysis.numericAttributes.add(key);
+        analysis.numericRanges.set(key, {
+          min: stats.min,
+          max: stats.max,
+        });
+      }
+    }
+
+    return analysis;
+  }
+
+  function containsLineGeometryType(geometry) {
+    if (!geometry || typeof geometry !== "object") {
+      return false;
+    }
+
+    if (geometry.type === "GeometryCollection") {
+      return Array.isArray(geometry.geometries)
+        ? geometry.geometries.some(containsLineGeometryType)
+        : false;
+    }
+
+    return (
+      geometry.type === "LineString" || geometry.type === "MultiLineString"
+    );
+  }
+
+  function extendBoundsForGeometry(geometry, bounds) {
+    if (!geometry || typeof geometry !== "object") {
+      return false;
+    }
+
+    if (geometry.type === "GeometryCollection") {
+      return Array.isArray(geometry.geometries)
+        ? geometry.geometries.reduce(
+            (hasBounds, child) =>
+              extendBoundsForGeometry(child, bounds) || hasBounds,
+            false,
+          )
+        : false;
+    }
+
+    let hasBounds = false;
+    traverseCoordinatePairs(geometry.coordinates, (lon, lat) => {
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+        return;
+      }
+      bounds.minX = Math.min(bounds.minX, lon);
+      bounds.minY = Math.min(bounds.minY, lat);
+      bounds.maxX = Math.max(bounds.maxX, lon);
+      bounds.maxY = Math.max(bounds.maxY, lat);
+      hasBounds = true;
+    });
+    return hasBounds;
+  }
+
+  function traverseCoordinatePairs(value, visitor) {
+    if (!Array.isArray(value)) {
+      return;
+    }
+
+    if (typeof value[0] === "number" && typeof value[1] === "number") {
+      visitor(value[0], value[1]);
+      return;
+    }
+
+    for (const item of value) {
+      traverseCoordinatePairs(item, visitor);
+    }
+  }
+
+  function fitMapToAnalysedBounds() {
+    const bounds = documentAnalysis.bounds;
+    if (!bounds) {
+      return;
+    }
+
+    const { minX, minY, maxX, maxY } = bounds;
+    if (
+      !Number.isFinite(minX) ||
+      !Number.isFinite(minY) ||
+      !Number.isFinite(maxX) ||
+      !Number.isFinite(maxY)
+    ) {
+      return;
+    }
+
+    if (minX === maxX && minY === maxY) {
+      map.easeTo({ center: [minX, minY], zoom: 12 });
+      return;
+    }
+
+    map.fitBounds(
+      [
+        [minX, minY],
+        [maxX, maxY],
+      ],
+      { padding: 32, duration: 500 },
+    );
+  }
+
   function prepareMapData(data) {
     const collection = normaliseGeoJson(data);
     if (!collection) {
@@ -2423,7 +2840,7 @@
       : [];
     const decorated = features.map((feature, index) => ({
       type: "Feature",
-      geometry: feature.geometry ? cloneGeometry(feature.geometry) : null,
+      geometry: feature.geometry || null,
       properties: {
         ...sanitizeProperties(feature.properties),
         __editorIndex: index,
@@ -2431,10 +2848,6 @@
     }));
 
     return { type: "FeatureCollection", features: decorated };
-  }
-
-  function cloneGeometry(geometry) {
-    return geometry ? JSON.parse(JSON.stringify(geometry)) : null;
   }
 
   function refreshSelectionHighlight() {
@@ -2472,26 +2885,10 @@
   }
 
   function populateAttributeOptions(data) {
-    const features = collectFeatures(data);
-    const attributes = new Set();
-
-    for (const feature of features) {
-      const properties = sanitizeProperties(feature.properties);
-      for (const key of Object.keys(properties)) {
-        const value = properties[key];
-        if (value === null) {
-          continue;
-        }
-        const valueType = typeof value;
-        if (
-          valueType === "string" ||
-          valueType === "number" ||
-          valueType === "boolean"
-        ) {
-          attributes.add(key);
-        }
-      }
-    }
+    const attributes =
+      data === currentGeoJson
+        ? documentAnalysis.attributes
+        : analyseFeatureCollection(data).attributes;
 
     const currentSelection = attributeSelect.value;
     attributeSelect.innerHTML = "";
@@ -2514,7 +2911,7 @@
     }
 
     populateLabelFieldOptions(attributes);
-    populateOpacityAttributeOptions(features);
+    populateOpacityAttributeOptions(data);
 
     updateAttributeColouringControls();
   }
@@ -2551,33 +2948,11 @@
     updateLabelControls();
   }
 
-  function populateOpacityAttributeOptions(features) {
-    const numericAttributes = new Set();
-    const attributeStats = new Map();
-
-    for (const feature of features) {
-      const properties = sanitizeProperties(feature.properties);
-      for (const [key, rawValue] of Object.entries(properties)) {
-        if (rawValue === null || typeof rawValue === "undefined") {
-          continue;
-        }
-        if (!attributeStats.has(key)) {
-          attributeStats.set(key, { hasNumber: false, hasNonNumber: false });
-        }
-        const stats = attributeStats.get(key);
-        if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
-          stats.hasNumber = true;
-        } else {
-          stats.hasNonNumber = true;
-        }
-      }
-    }
-
-    for (const [key, stats] of attributeStats.entries()) {
-      if (stats.hasNumber && !stats.hasNonNumber) {
-        numericAttributes.add(key);
-      }
-    }
+  function populateOpacityAttributeOptions(data) {
+    const numericAttributes =
+      data === currentGeoJson
+        ? documentAnalysis.numericAttributes
+        : analyseFeatureCollection(data).numericAttributes;
 
     const currentSelection = styleState.opacityAttribute;
     opacityAttributeSelect.innerHTML = "";
@@ -2954,24 +3329,8 @@
   }
 
   function getLabelPreviewValue(field) {
-    const features = collectFeatures(currentGeoJson);
-    for (const feature of features) {
-      const properties = sanitizeProperties(feature.properties);
-      if (!Object.prototype.hasOwnProperty.call(properties, field)) {
-        continue;
-      }
-
-      const rawValue = properties[field];
-      if (rawValue === null || typeof rawValue === "undefined") {
-        continue;
-      }
-
-      const preview = formatTooltipValue(rawValue).trim();
-      if (!preview.length) {
-        continue;
-      }
-
-      return preview.length > 36 ? `${preview.slice(0, 33)}...` : preview;
+    if (documentAnalysis.labelPreviewValues.has(field)) {
+      return documentAnalysis.labelPreviewValues.get(field);
     }
 
     return "No label values yet";
@@ -3023,47 +3382,13 @@
     if (!attribute) {
       return null;
     }
-
-    const features = collectFeatures(currentGeoJson);
-    let min = Infinity;
-    let max = -Infinity;
-    let hasNumber = false;
-
-    for (const feature of features) {
-      const props = sanitizeProperties(feature.properties);
-      if (!(attribute in props)) {
-        continue;
-      }
-
-      const value = props[attribute];
-      if (value === null || typeof value === "undefined") {
-        continue;
-      }
-
-      if (typeof value !== "number" || !Number.isFinite(value)) {
-        return null;
-      }
-
-      hasNumber = true;
-      min = Math.min(min, value);
-      max = Math.max(max, value);
-    }
-
-    if (!hasNumber) {
-      return null;
-    }
-
-    return { min, max };
+    return documentAnalysis.numericRanges.get(attribute) || null;
   }
 
   function containsLineGeometry(data) {
-    const features = collectFeatures(data);
-    return features.some((feature) => {
-      const geometryType = feature?.geometry?.type;
-      return (
-        geometryType === "LineString" || geometryType === "MultiLineString"
-      );
-    });
+    return data === currentGeoJson
+      ? documentAnalysis.hasLineGeometry
+      : analyseFeatureCollection(data).hasLineGeometry;
   }
 
   function syncStyleInputs() {
@@ -3171,7 +3496,7 @@
       const { collection, notice } = enforceFormatConstraints(rounded);
       const serialised = JSON.stringify(collection, null, 2);
 
-      currentGeoJson = collection;
+      setCurrentGeoJson(collection);
       currentText = serialised;
       setEditorText(serialised);
       updateMap(collection);
@@ -3571,13 +3896,49 @@
   }
 
   function updateJsonHighlight(text) {
+    const source = typeof text === "string" ? text : "";
+    updateRawEditorMode(source);
+
     if (!highlightLayer) {
       return;
     }
 
-    const source = typeof text === "string" ? text : "";
+    if (rawEditorLargeMode) {
+      highlightLayer.textContent = "";
+      updateJsonGutter(source);
+      return;
+    }
+
     highlightLayer.innerHTML = highlightJson(source);
     updateJsonGutter(source);
+  }
+
+  function updateRawEditorMode(text) {
+    rawEditorLargeMode = isLargeRawDocument(text);
+    if (jsonEditor) {
+      jsonEditor.classList.toggle("plain-text", rawEditorLargeMode);
+    }
+  }
+
+  function isLargeRawDocument(text) {
+    const source = typeof text === "string" ? text : "";
+    return (
+      source.length > largeRawEditorThresholds.characters ||
+      hasMoreThanLineThreshold(source, largeRawEditorThresholds.lines)
+    );
+  }
+
+  function hasMoreThanLineThreshold(text, threshold) {
+    let lines = 1;
+    for (let index = 0; index < text.length; index += 1) {
+      if (text.charCodeAt(index) === 10) {
+        lines += 1;
+        if (lines > threshold) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   function highlightJson(text) {
@@ -3744,6 +4105,10 @@
     if (!jsonGutter) {
       return;
     }
+    if (rawEditorLargeMode) {
+      jsonGutter.textContent = "";
+      return;
+    }
     const lineCount = Math.max(1, String(text).split("\n").length);
     const lines = Array.from({ length: lineCount }, (_, index) =>
       String(index + 1),
@@ -3752,8 +4117,10 @@
   }
 
   function updateDocumentMetrics() {
-    const featureCount = collectFeatures(currentGeoJson).length;
-    const fileBytes = getUtf8ByteLength(currentText || "");
+    const featureCount = documentAnalysis.featureCount;
+    const fileBytes = rawEditorLargeMode
+      ? (currentText || "").length
+      : getUtf8ByteLength(currentText || "");
     const featureLabel = `Features ${featureCount}`;
     const sizeLabel = `Size ${formatBytes(fileBytes)}`;
 
@@ -3787,7 +4154,78 @@
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   }
 
-  function setLoading(isLoading) {
+  function showLargeFileLoading(progress, step, detail) {
+    updateLargeFileLoading(progress, step, detail);
+    if (!largeFileLoading) {
+      return;
+    }
+    largeFileLoading.classList.remove("hidden");
+    largeFileLoading.setAttribute("aria-hidden", "false");
+    largeFileLoading.setAttribute("aria-busy", "true");
+  }
+
+  function hideLargeFileLoading() {
+    if (!largeFileLoading) {
+      return;
+    }
+    largeFileLoading.classList.add("hidden");
+    largeFileLoading.setAttribute("aria-hidden", "true");
+    largeFileLoading.removeAttribute("aria-busy");
+  }
+
+  function showRawDataPopup(reason, title, message) {
+    activeRawDataPopupReason = reason;
+    if (!rawDataPopup || dismissedRawDataPopupReason === reason) {
+      return;
+    }
+    if (rawDataPopupTitle) {
+      rawDataPopupTitle.textContent = title;
+    }
+    if (rawDataPopupMessage) {
+      rawDataPopupMessage.textContent = message;
+    }
+    rawDataPopup.classList.remove("hidden");
+    rawDataPopup.setAttribute("aria-hidden", "false");
+  }
+
+  function hideRawDataPopup(options = {}) {
+    const { resetDismissed = false } = options;
+    activeRawDataPopupReason = "";
+    if (resetDismissed) {
+      dismissedRawDataPopupReason = "";
+    }
+    if (!rawDataPopup) {
+      return;
+    }
+    rawDataPopup.classList.add("hidden");
+    rawDataPopup.setAttribute("aria-hidden", "true");
+  }
+
+  function updateLargeFileLoading(progress, step, detail) {
+    const percent = Math.round(clampNumber(progress, 0, 100, 0));
+
+    if (largeFileLoadingPercent) {
+      largeFileLoadingPercent.textContent = `${percent}%`;
+    }
+    if (largeFileLoadingStep && step) {
+      largeFileLoadingStep.textContent = step;
+    }
+    if (largeFileLoadingDetail && detail) {
+      largeFileLoadingDetail.textContent = detail;
+    }
+    if (largeFileLoadingProgress) {
+      largeFileLoadingProgress.setAttribute("aria-valuenow", String(percent));
+    }
+    if (largeFileLoadingBar) {
+      largeFileLoadingBar.style.width = `${percent}%`;
+    }
+  }
+
+  function hideMapLoading() {
+    setLoading(false);
+  }
+
+  function setLoading(isLoading, options = {}) {
     if (!loadingIndicator) {
       return;
     }
@@ -3798,12 +4236,18 @@
     }
 
     if (isLoading) {
-      loadingTimeout = setTimeout(() => {
+      const showLoading = () => {
         loadingTimeout = null;
         loadingIndicator.classList.remove("hidden");
         loadingIndicator.setAttribute("aria-hidden", "false");
         loadingIndicator.setAttribute("aria-busy", "true");
-      }, 150);
+      };
+
+      if (options.immediate) {
+        showLoading();
+      } else {
+        loadingTimeout = setTimeout(showLoading, 150);
+      }
     } else {
       loadingIndicator.classList.add("hidden");
       loadingIndicator.setAttribute("aria-hidden", "true");
@@ -3861,7 +4305,7 @@
     }
 
     if (!currentGeoJson || !Array.isArray(currentGeoJson.features)) {
-      currentGeoJson = { type: "FeatureCollection", features: [] };
+      setCurrentGeoJson({ type: "FeatureCollection", features: [] });
     }
 
     const newFeature = {

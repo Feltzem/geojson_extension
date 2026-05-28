@@ -67,6 +67,8 @@ The custom editor is registered as the default editor for supported GeoJSON file
 ### Raw data editing
 
 - Embedded raw document editor with JSON syntax highlighting.
+- Smaller files are automatically formatted as pretty JSON in the document editor.
+- Large files switch to a high-performance plain-text document editor mode with a staged loading screen and progress bar.
 - Coordinate rounding tool (0-10 decimal places).
 - Apply workflow validates/normalizes data, updates the map, and saves back to disk.
 - Invalid JSON/GeoJSON input is surfaced with clear error messages.
@@ -118,7 +120,7 @@ An internet connection is required for remote basemap/style assets:
 
 ## Known Limitations
 
-- Very large datasets can impact webview and map rendering performance.
+- Very large datasets use a high-performance plain-text document editor mode, so full JSON syntax highlighting and line gutters are disabled for those files.
 - Vertex editing currently focuses on common geometry paths (for multi-geometries, editing is limited to the first editable branch).
 
 ## Development
@@ -164,19 +166,19 @@ An internet connection is required for remote basemap/style assets:
 6. To test the packaged extension, build a VSIX:
 
    ```sh
-   npm run package:vsix -- --out /private/tmp/geojson-visual-editor.vsix
-   code --install-extension /private/tmp/geojson-visual-editor.vsix
+   npm run package:vsix -- --out dist/geojson-visual-editor-0.6.3.vsix
+   code --install-extension dist/geojson-visual-editor-0.6.3.vsix
    ```
 
-   The package uses `.vscodeignore` so source files, tests, maps, and `.vscode-test/` are excluded from the VSIX.
+   The ignored `dist/` folder is used for local VSIX builds. The package uses `.vscodeignore` so source files, tests, maps, and `.vscode-test/` are excluded from the VSIX.
 
 7. To publish a downloadable VSIX in GitHub Releases:
    - Bump the version in `package.json` and `package-lock.json`.
    - Update `CHANGELOG.md`.
    - Run `npm test`.
    - Commit and push the release changes.
-   - Create and push a matching git tag such as `v0.6.2`.
-   - GitHub Actions will build `geojson-visual-editor-0.6.2.vsix` and attach it to the corresponding GitHub Release.
+   - Create and push a matching git tag such as `v0.6.3`.
+   - GitHub Actions will build `geojson-visual-editor-0.6.3.vsix` and attach it to the corresponding GitHub Release.
 
 ## Release Notes
 
