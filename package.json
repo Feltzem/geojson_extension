@@ -4,7 +4,7 @@
   "description": "Open, edit, and visualize GeoJSON data",
   "icon": "media/icon.png",
   "publisher": "feltzem",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/Feltzem/geojson_extension.git"
@@ -55,10 +55,10 @@
         "geojsonVisualEditor.uiScale": {
           "type": "number",
           "default": 1,
-          "minimum": 0.85,
-          "maximum": 1.4,
+          "minimum": 1,
+          "maximum": 1.5,
           "scope": "resource",
-          "markdownDescription": "Scales the GeoJSON Visual Editor webview UI. Use values above `1` to make the controls, panel, overlays, and JSON editor larger."
+          "markdownDescription": "Scales the GeoJSON Visual Editor webview UI from `1` to `1.5`. Use values above `1` to make the controls, panel, overlays, and JSON editor larger."
         },
         "geojsonVisualEditor.defaultBasemap": {
           "type": "string",
@@ -132,6 +132,24 @@
           "maximum": 24,
           "scope": "resource",
           "description": "Default feature label size in map pixels."
+        },
+        "geojsonVisualEditor.defaultCategoricalPalette": {
+          "type": "string",
+          "default": "bright",
+          "enum": [
+            "bright",
+            "modern",
+            "pastel",
+            "dark"
+          ],
+          "enumDescriptions": [
+            "Bright, saturated colours.",
+            "Modern, muted colours.",
+            "Soft pastel colours.",
+            "Deep dark colours."
+          ],
+          "scope": "resource",
+          "description": "Default colour palette used when colouring features by a categorical attribute."
         }
       }
     }

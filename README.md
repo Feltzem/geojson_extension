@@ -166,8 +166,8 @@ An internet connection is required for remote basemap/style assets:
 6. To test the packaged extension, build a VSIX:
 
    ```sh
-   npm run package:vsix -- --out dist/geojson-visual-editor-0.6.3.vsix
-   code --install-extension dist/geojson-visual-editor-0.6.3.vsix
+   npm run package:vsix -- --out dist/geojson-visual-editor-0.7.0.vsix
+   code --install-extension dist/geojson-visual-editor-0.7.0.vsix
    ```
 
    The ignored `dist/` folder is used for local VSIX builds. The package uses `.vscodeignore` so source files, tests, maps, and `.vscode-test/` are excluded from the VSIX.
@@ -177,8 +177,8 @@ An internet connection is required for remote basemap/style assets:
    - Update `CHANGELOG.md`.
    - Run `npm test`.
    - Commit and push the release changes.
-   - Create and push a matching git tag such as `v0.6.3`.
-   - GitHub Actions will build `geojson-visual-editor-0.6.3.vsix` and attach it to the corresponding GitHub Release.
+   - Create and push a matching git tag such as `v0.7.0`.
+   - GitHub Actions will build `geojson-visual-editor-0.7.0.vsix` and attach it to the corresponding GitHub Release.
 
 ## Release Notes
 

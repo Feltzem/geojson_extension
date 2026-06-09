@@ -45,3 +45,8 @@ All notable changes to the "geojson-visual-editor" extension will be documented 
 - Loading: Add a polished large-document loading screen with staged progress while parsing, scanning features, rendering map layers, and syncing editor controls.
 - Document editor: Keep pretty-printed JSON formatting and syntax highlighting for smaller files while using a fast plain-text editor mode for large documents.
 - Development: Package VSIX builds into an ignored `dist/` folder.
+
+## [0.7.0] - 2026-06-09
+
+- Tooltips: Dynamically widen the feature hover tooltip when a property value is long enough to wrap, expanding the popup to roughly double width before continuing to wrap so long values stay readable.
+- Categorical colour palettes: When colouring by a field, choose from four preset colour palettes, with the option to customise each category's colour individually

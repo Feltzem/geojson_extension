@@ -17,8 +17,11 @@ const LABEL_FONT_FAMILIES = [
   "Arial Unicode MS Bold",
 ] as const;
 
+const CATEGORICAL_PALETTES = ["bright", "modern", "pastel", "dark"] as const;
+
 export type BasemapId = (typeof BASEMAP_IDS)[number];
 export type LabelFontFamily = (typeof LABEL_FONT_FAMILIES)[number];
+export type CategoricalPalette = (typeof CATEGORICAL_PALETTES)[number];
 
 export interface EditorSettings {
   uiScale: number;
@@ -30,6 +33,7 @@ export interface EditorSettings {
   defaultLabelsEnabled: boolean;
   defaultLabelFontFamily: LabelFontFamily;
   defaultLabelSize: number;
+  defaultCategoricalPalette: CategoricalPalette;
 }
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
@@ -42,6 +46,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   defaultLabelsEnabled: false,
   defaultLabelFontFamily: "Open Sans Semibold",
   defaultLabelSize: 12,
+  defaultCategoricalPalette: "bright",
 };
 
 export function toWebviewPayload(rawText: string): {
@@ -73,8 +78,8 @@ export function normaliseEditorSettings(
   return {
     uiScale: normaliseNumber(
       rawSettings.uiScale,
-      0.85,
-      1.4,
+      1,
+      1.5,
       DEFAULT_EDITOR_SETTINGS.uiScale,
     ),
     defaultBasemap: normaliseOption(
@@ -117,6 +122,11 @@ export function normaliseEditorSettings(
       8,
       24,
       DEFAULT_EDITOR_SETTINGS.defaultLabelSize,
+    ),
+    defaultCategoricalPalette: normaliseOption(
+      rawSettings.defaultCategoricalPalette,
+      CATEGORICAL_PALETTES,
+      DEFAULT_EDITOR_SETTINGS.defaultCategoricalPalette,
     ),
   };
 }
@@ -295,6 +305,7 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
       defaultLabelsEnabled: config.get("defaultLabelsEnabled"),
       defaultLabelFontFamily: config.get("defaultLabelFontFamily"),
       defaultLabelSize: config.get("defaultLabelSize"),
+      defaultCategoricalPalette: config.get("defaultCategoricalPalette"),
     });
   }
 
@@ -434,6 +445,21 @@ class GeoJsonEditorProvider implements vscode.CustomTextEditorProvider {
                   <option value="categorical">Categorical</option>
                   <option value="gradient">Gradient (numeric fields)</option>
                 </select>
+              </div>
+              <div id="categorical-controls" class="categorical-controls" aria-live="polite">
+                <div class="control-group">
+                  <label for="categorical-palette-select">Categorical palette</label>
+                  <select id="categorical-palette-select">
+                    <option value="bright">Bright</option>
+                    <option value="modern">Modern</option>
+                    <option value="pastel">Pastel</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </div>
+                <details class="categorical-legend-details">
+                  <summary>Value colours</summary>
+                  <div id="categorical-legend" class="categorical-legend"></div>
+                </details>
               </div>
               <div id="gradient-controls" class="gradient-controls hidden" aria-live="polite">
                 <div class="control-group">

@@ -56,6 +56,7 @@ const LABEL_FONT_FAMILIES = [
     "Arial Unicode MS Regular",
     "Arial Unicode MS Bold",
 ];
+const CATEGORICAL_PALETTES = ["bright", "modern", "pastel", "dark"];
 exports.DEFAULT_EDITOR_SETTINGS = {
     uiScale: 1,
     defaultBasemap: "carto-positron",
@@ -66,6 +67,7 @@ exports.DEFAULT_EDITOR_SETTINGS = {
     defaultLabelsEnabled: false,
     defaultLabelFontFamily: "Open Sans Semibold",
     defaultLabelSize: 12,
+    defaultCategoricalPalette: "bright",
 };
 function toWebviewPayload(rawText) {
     if (!rawText.trim().length) {
@@ -86,7 +88,7 @@ function fromWebviewText(webviewText) {
 }
 function normaliseEditorSettings(rawSettings) {
     return {
-        uiScale: normaliseNumber(rawSettings.uiScale, 0.85, 1.4, exports.DEFAULT_EDITOR_SETTINGS.uiScale),
+        uiScale: normaliseNumber(rawSettings.uiScale, 1, 1.5, exports.DEFAULT_EDITOR_SETTINGS.uiScale),
         defaultBasemap: normaliseOption(rawSettings.defaultBasemap, BASEMAP_IDS, exports.DEFAULT_EDITOR_SETTINGS.defaultBasemap),
         defaultFillColor: normaliseHexColour(rawSettings.defaultFillColor, exports.DEFAULT_EDITOR_SETTINGS.defaultFillColor),
         defaultStrokeColor: normaliseHexColour(rawSettings.defaultStrokeColor, exports.DEFAULT_EDITOR_SETTINGS.defaultStrokeColor, true),
@@ -97,6 +99,7 @@ function normaliseEditorSettings(rawSettings) {
             : exports.DEFAULT_EDITOR_SETTINGS.defaultLabelsEnabled,
         defaultLabelFontFamily: normaliseOption(rawSettings.defaultLabelFontFamily, LABEL_FONT_FAMILIES, exports.DEFAULT_EDITOR_SETTINGS.defaultLabelFontFamily),
         defaultLabelSize: normaliseNumber(rawSettings.defaultLabelSize, 8, 24, exports.DEFAULT_EDITOR_SETTINGS.defaultLabelSize),
+        defaultCategoricalPalette: normaliseOption(rawSettings.defaultCategoricalPalette, CATEGORICAL_PALETTES, exports.DEFAULT_EDITOR_SETTINGS.defaultCategoricalPalette),
     };
 }
 function buildWebviewCsp(cspSource, nonce) {
@@ -230,6 +233,7 @@ class GeoJsonEditorProvider {
             defaultLabelsEnabled: config.get("defaultLabelsEnabled"),
             defaultLabelFontFamily: config.get("defaultLabelFontFamily"),
             defaultLabelSize: config.get("defaultLabelSize"),
+            defaultCategoricalPalette: config.get("defaultCategoricalPalette"),
         });
     }
     getWebviewContent(webview) {
@@ -356,6 +360,21 @@ class GeoJsonEditorProvider {
                   <option value="categorical">Categorical</option>
                   <option value="gradient">Gradient (numeric fields)</option>
                 </select>
+              </div>
+              <div id="categorical-controls" class="categorical-controls" aria-live="polite">
+                <div class="control-group">
+                  <label for="categorical-palette-select">Categorical palette</label>
+                  <select id="categorical-palette-select">
+                    <option value="bright">Bright</option>
+                    <option value="modern">Modern</option>
+                    <option value="pastel">Pastel</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </div>
+                <details class="categorical-legend-details">
+                  <summary>Value colours</summary>
+                  <div id="categorical-legend" class="categorical-legend"></div>
+                </details>
               </div>
               <div id="gradient-controls" class="gradient-controls hidden" aria-live="polite">
                 <div class="control-group">

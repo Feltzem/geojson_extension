@@ -108,6 +108,11 @@
   const gradientPresetSelect = document.getElementById(
     "gradient-preset-select",
   );
+  const categoricalControls = document.getElementById("categorical-controls");
+  const categoricalPaletteSelect = document.getElementById(
+    "categorical-palette-select",
+  );
+  const categoricalLegend = document.getElementById("categorical-legend");
   const opacityAttributeSelect = document.getElementById(
     "opacity-attribute-select",
   );
@@ -121,20 +126,102 @@
   );
   const collapsibleToggles = document.querySelectorAll(".collapsible-toggle");
 
-  const palette = [
-    "#3b82f6",
-    "#ec4899",
-    "#f97316",
-    "#22c55e",
-    "#a855f7",
-    "#14b8a6",
-    "#facc15",
-    "#ef4444",
-    "#6366f1",
-    "#f59e0b",
-    "#0ea5e9",
-    "#10b981",
-  ];
+  const categoricalPalettes = {
+    bright: [
+      "#3b82f6",
+      "#ec4899",
+      "#f97316",
+      "#22c55e",
+      "#a855f7",
+      "#14b8a6",
+      "#facc15",
+      "#ef4444",
+      "#6366f1",
+      "#f59e0b",
+      "#0ea5e9",
+      "#10b981",
+    ],
+    modern: [
+      "#2563eb",
+      "#db2777",
+      "#0891b2",
+      "#65a30d",
+      "#7c3aed",
+      "#ea580c",
+      "#0d9488",
+      "#c026d3",
+      "#4f46e5",
+      "#ca8a04",
+      "#0284c7",
+      "#16a34a",
+    ],
+    pastel: [
+      "#a5d8ff",
+      "#ffc9c9",
+      "#b2f2bb",
+      "#ffec99",
+      "#d0bfff",
+      "#99e9f2",
+      "#ffd8a8",
+      "#fcc2d7",
+      "#c3fae8",
+      "#e9d8a6",
+      "#bac8ff",
+      "#eebefa",
+    ],
+    dark: [
+      "#1e3a8a",
+      "#831843",
+      "#9a3412",
+      "#14532d",
+      "#581c87",
+      "#134e4a",
+      "#854d0e",
+      "#7f1d1d",
+      "#312e81",
+      "#78350f",
+      "#075985",
+      "#064e3b",
+    ],
+  };
+
+  function getActivePalette() {
+    return (
+      categoricalPalettes[styleState.categoricalPalette] ||
+      categoricalPalettes.bright
+    );
+  }
+
+  function getCategoricalOverrideBucket(palette, attribute, create) {
+    const overrides = styleState.categoricalOverrides;
+    let byAttribute = overrides[palette];
+    if (!byAttribute) {
+      if (!create) {
+        return null;
+      }
+      byAttribute = {};
+      overrides[palette] = byAttribute;
+    }
+    let byValue = byAttribute[attribute];
+    if (!byValue) {
+      if (!create) {
+        return null;
+      }
+      byValue = {};
+      byAttribute[attribute] = byValue;
+    }
+    return byValue;
+  }
+
+  function getCategoricalOverride(palette, attribute, value) {
+    const bucket = getCategoricalOverrideBucket(palette, attribute, false);
+    return bucket ? bucket[value] : undefined;
+  }
+
+  function setCategoricalOverride(palette, attribute, value, colour) {
+    const bucket = getCategoricalOverrideBucket(palette, attribute, true);
+    bucket[value] = colour;
+  }
 
   const gradientPresets = {
     magma: {
@@ -207,6 +294,7 @@
     defaultLabelsEnabled: false,
     defaultLabelFontFamily: "Open Sans Semibold",
     defaultLabelSize: 12,
+    defaultCategoricalPalette: "bright",
   };
   const utils = window.geojsonEditorUtils;
 
@@ -254,6 +342,7 @@
   let activeRawDataPopupReason = "";
   let dismissedRawDataPopupReason = "";
   let toolbarDragState = null;
+  let categoricalSettingsInitialised = false;
   const maxVertexInsertDistancePx = 24;
   const maxVertexDeleteDistancePx = 16;
   const maxVertexSnapDistancePx = 14;
@@ -265,6 +354,10 @@
     lineWidth: defaultEditorSettings.defaultLineWidth,
     strokeWidth: defaultEditorSettings.defaultStrokeWidth,
     attributeColourMode: "categorical",
+    categoricalPalette: defaultEditorSettings.defaultCategoricalPalette,
+    // Session-only overrides keyed by palette -> attribute -> value -> hex.
+    categoricalOverrides: {},
+    categoricalValues: [],
     gradientStartColor: "#0ea5e9",
     gradientMiddleEnabled: false,
     gradientMiddleColor: "#facc15",
@@ -750,6 +843,11 @@
     applyColouring(attributeSelect.value);
   });
 
+  categoricalPaletteSelect.addEventListener("change", () => {
+    styleState.categoricalPalette = categoricalPaletteSelect.value;
+    applyColouring(attributeSelect.value);
+  });
+
   gradientPresetSelect.addEventListener("change", () => {
     const presetKey = gradientPresetSelect.value;
     styleState.gradientPreset = presetKey;
@@ -1147,6 +1245,13 @@
     styleState.labelsEnabled = nextSettings.defaultLabelsEnabled;
     styleState.labelFontFamily = nextSettings.defaultLabelFontFamily;
     styleState.labelSize = nextSettings.defaultLabelSize;
+    // Seed the palette from the default only on first load; later configuration
+    // changes must not clobber the palette or custom colours the user picked
+    // during this session.
+    if (!categoricalSettingsInitialised) {
+      styleState.categoricalPalette = nextSettings.defaultCategoricalPalette;
+      categoricalSettingsInitialised = true;
+    }
 
     applyUiScale(nextSettings.uiScale);
 
@@ -1178,8 +1283,8 @@
     return {
       uiScale: normaliseSettingNumber(
         Number(source.uiScale),
-        0.85,
-        1.4,
+        1,
+        1.5,
         defaultEditorSettings.uiScale,
       ),
       defaultBasemap: Object.prototype.hasOwnProperty.call(
@@ -1223,6 +1328,12 @@
         24,
         defaultEditorSettings.defaultLabelSize,
       ),
+      defaultCategoricalPalette: Object.prototype.hasOwnProperty.call(
+        categoricalPalettes,
+        source.defaultCategoricalPalette,
+      )
+        ? source.defaultCategoricalPalette
+        : defaultEditorSettings.defaultCategoricalPalette,
     };
   }
 
@@ -1775,8 +1886,8 @@
     }
 
     map.getCanvas().style.cursor = "pointer";
-    const tooltipHtml = buildHoverTooltipHtml(features[0]);
-    if (!tooltipHtml) {
+    const tooltip = buildHoverTooltipHtml(features[0]);
+    if (!tooltip || !tooltip.html) {
       hideHoverTooltip();
       return;
     }
@@ -1790,7 +1901,12 @@
       });
     }
 
-    hoverPopup.setLngLat(event.lngLat).setHTML(tooltipHtml).addTo(map);
+    hoverPopup.setLngLat(event.lngLat).setHTML(tooltip.html).addTo(map);
+
+    const popupContainer = hoverPopup.getElement();
+    if (popupContainer) {
+      popupContainer.classList.toggle("feature-tooltip-popup--wide", tooltip.wide);
+    }
   }
 
   function hideHoverTooltip() {
@@ -2469,7 +2585,7 @@
 
   function buildHoverTooltipHtml(renderedFeature) {
     if (!renderedFeature) {
-      return "";
+      return { html: "", wide: false };
     }
 
     let properties = {};
@@ -2492,18 +2608,30 @@
 
     const entries = Object.entries(properties);
     if (!entries.length) {
-      return '<div class="feature-tooltip-empty">No attributes</div>';
+      return { html: '<div class="feature-tooltip-empty">No attributes</div>', wide: false };
     }
 
+    // Approximate characters that fit on one line in the value cell at the
+    // base popup width. When a value would wrap past this, the tooltip is
+    // widened (~2x) so it wraps to fewer lines.
+    const NARROW_VALUE_CHARS = 28;
+
+    let wide = false;
     const rows = entries
       .map(([key, value]) => {
         const safeKey = escapeHtml(key);
-        const safeValue = escapeHtml(formatTooltipValue(value));
-        return `<tr><th>${safeKey}</th><td>${safeValue}</td></tr>`;
+        const rawValue = formatTooltipValue(value);
+        if (rawValue.length > NARROW_VALUE_CHARS) {
+          wide = true;
+        }
+        return `<tr><th>${safeKey}</th><td>${escapeHtml(rawValue)}</td></tr>`;
       })
       .join("");
 
-    return `<table class="feature-tooltip-table"><tbody>${rows}</tbody></table>`;
+    return {
+      html: `<table class="feature-tooltip-table"><tbody>${rows}</tbody></table>`,
+      wide,
+    };
   }
 
   function formatTooltipValue(value) {
@@ -3006,6 +3134,7 @@
       return;
     }
 
+    const palette = getActivePalette();
     const features = collectFeatures(currentGeoJson);
     const seen = new Set();
     const values = [];
@@ -3034,14 +3163,22 @@
       return;
     }
 
+    const paletteName = styleState.categoricalPalette;
+    const colourForValue = (value, index) =>
+      getCategoricalOverride(paletteName, attribute, value) ||
+      palette[index % palette.length];
+
     const matchExpression = [
       "match",
       ["to-string", ["coalesce", ["get", attribute], ""]],
     ];
     values.forEach((value, index) => {
-      matchExpression.push(value, palette[index % palette.length]);
+      matchExpression.push(value, colourForValue(value, index));
     });
     matchExpression.push(styleState.fillColor);
+
+    styleState.categoricalValues = values;
+    renderCategoricalLegend(values);
 
     applyPaint("geojson-fill", "fill-color", matchExpression);
     applyPaint("geojson-line", "line-color", matchExpression);
@@ -3094,12 +3231,103 @@
   }
 
   function resetColours() {
+    styleState.categoricalValues = [];
+    renderCategoricalLegend([]);
     applyPaint("geojson-fill", "fill-color", styleState.fillColor);
     applyPaint("geojson-line", "line-color", styleState.fillColor);
     applyPaint("geojson-point", "circle-color", styleState.fillColor);
     applyLineStyling();
     applyStrokeStyling();
     applyOpacityStyling();
+  }
+
+  const CATEGORICAL_LEGEND_LIMIT = 10;
+  let legendSignature = null;
+
+  function legendSwatchColour(palette, attribute, value, index) {
+    const base = palette[index % palette.length];
+    return normaliseColour(
+      getCategoricalOverride(styleState.categoricalPalette, attribute, value) ||
+        base,
+      base,
+    );
+  }
+
+  function renderCategoricalLegend(values) {
+    if (!categoricalLegend) {
+      return;
+    }
+
+    const palette = getActivePalette();
+    const attribute = attributeSelect.value;
+    const shown = values.slice(0, CATEGORICAL_LEGEND_LIMIT);
+    const signature = JSON.stringify([
+      styleState.categoricalPalette,
+      attribute,
+      shown,
+      values.length,
+    ]);
+
+    // When the structure is unchanged (e.g. the user just edited one swatch),
+    // update the existing inputs in place so an open native colour picker is
+    // not torn down and dismissed.
+    if (signature === legendSignature) {
+      const swatches = categoricalLegend.querySelectorAll(".legend-swatch");
+      shown.forEach((value, index) => {
+        const swatch = swatches[index];
+        if (swatch && document.activeElement !== swatch) {
+          swatch.value = legendSwatchColour(palette, attribute, value, index);
+        }
+      });
+      return;
+    }
+
+    legendSignature = signature;
+    categoricalLegend.textContent = "";
+
+    if (!shown.length) {
+      const empty = document.createElement("p");
+      empty.className = "legend-empty";
+      empty.textContent =
+        "Select a categorical attribute to see its colours here.";
+      categoricalLegend.appendChild(empty);
+      return;
+    }
+
+    shown.forEach((value, index) => {
+      const row = document.createElement("label");
+      row.className = "legend-row color-field";
+
+      const swatch = document.createElement("input");
+      swatch.type = "color";
+      swatch.className = "legend-swatch";
+      swatch.value = legendSwatchColour(palette, attribute, value, index);
+      swatch.addEventListener("input", () => {
+        setCategoricalOverride(
+          styleState.categoricalPalette,
+          attributeSelect.value,
+          value,
+          normaliseColour(swatch.value, swatch.value),
+        );
+        applyColouring(attributeSelect.value);
+      });
+
+      const label = document.createElement("span");
+      label.className = "legend-label";
+      label.textContent = value;
+      label.title = value;
+
+      row.appendChild(swatch);
+      row.appendChild(label);
+      categoricalLegend.appendChild(row);
+    });
+
+    if (values.length > CATEGORICAL_LEGEND_LIMIT) {
+      const more = document.createElement("p");
+      more.className = "legend-more";
+      more.textContent = `+${values.length - CATEGORICAL_LEGEND_LIMIT} more value(s) coloured on the map`;
+      categoricalLegend.appendChild(more);
+    }
   }
 
   function applyOpacityStyling() {
@@ -3231,6 +3459,13 @@
       isNumericAttribute &&
       styleState.attributeColourMode === "gradient";
     gradientControls.classList.toggle("hidden", !showGradientControls);
+
+    const showCategoricalControls =
+      hasAttribute && styleState.attributeColourMode === "categorical";
+    categoricalControls.classList.toggle("hidden", !showCategoricalControls);
+    categoricalPaletteSelect.disabled = !showCategoricalControls;
+    categoricalPaletteSelect.value = styleState.categoricalPalette;
+    syncCustomSelect(categoricalPaletteSelect);
 
     gradientStartColourInput.disabled = !showGradientControls;
     gradientMiddleEnabledInput.disabled = !showGradientControls;
