@@ -708,9 +708,90 @@ textarea {
   min-width: var(--carto-panel-width);
   max-width: var(--carto-panel-width);
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
   background: var(--carto-panel);
   border-left: 0.5px solid var(--carto-line-alpha);
+}
+
+.panel-header,
+.panel-tabs,
+.panel-footer {
+  flex: 0 0 auto;
+}
+
+.panel-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px var(--carto-panel-padding-x);
+  background: var(--carto-panel-elevated);
+  border-bottom: 0.5px solid var(--carto-line-alpha);
+}
+
+.panel-tab {
+  flex: 1 1 0;
+  min-height: var(--carto-control-height);
+  padding: 4px 8px;
+  border: 0.5px solid var(--carto-line-alpha);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--carto-elev) 88%, var(--carto-panel));
+  color: var(--carto-text-mute);
+  font-size: var(--carto-font-size-ui);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.panel-tab:hover {
+  color: var(--carto-accent);
+  background: var(--carto-accent-soft);
+}
+
+.panel-tab.is-active {
+  color: var(--vscode-button-foreground, #ffffff);
+  background: var(--carto-accent);
+  border-color: var(--carto-accent);
+}
+
+.tab-pane {
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tab-pane.is-active {
+  display: flex;
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.panel-footer {
+  padding: var(--carto-panel-padding-y) var(--carto-panel-padding-x);
+  background: var(--carto-panel-elevated);
+  border-top: 0.5px solid var(--carto-line-alpha);
+}
+
+/* Full-height raw JSON editor when the Data tab is active. */
+#pane-data.is-active,
+#pane-data.is-active > .properties-group,
+#pane-data.is-active .document-data-header + .collapsible-content,
+#pane-data.is-active .control-group:has(> .json-editor) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+#pane-data.is-active .json-editor {
+  flex: 1 1 auto;
+  min-height: var(--carto-json-min-height);
+  max-height: none;
+}
+
+#pane-data.is-active #geojson-highlight,
+#pane-data.is-active #geojson-input {
+  max-height: none;
 }
 
 .panel-header {
@@ -1545,9 +1626,52 @@ input[type="range"]::-moz-range-thumb {
 
 .actions {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 6px;
   align-items: center;
+}
+
+.history-actions {
+  display: inline-flex;
+  min-width: 0;
+  gap: 4px;
+}
+
+.history-actions button {
+  min-width: 44px;
+  padding-inline: 7px;
+}
+
+.dirty-state {
+  min-width: 0;
+  justify-self: start;
+  overflow: hidden;
+  padding: 3px 7px;
+  border: 0.5px solid var(--carto-line-alpha);
+  border-radius: 4px;
+  color: var(--carto-text-mute);
+  background: color-mix(in srgb, var(--carto-elev) 42%, transparent);
+  font-size: var(--carto-font-size-readout);
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dirty-state.is-dirty,
+.dirty-state.is-staged {
+  color: var(--carto-warn);
+  background: color-mix(in srgb, var(--carto-warn) 12%, var(--carto-elev));
+}
+
+.dirty-state.is-conflict,
+.dirty-state.is-error {
+  color: var(--carto-danger);
+  background: color-mix(in srgb, var(--carto-danger) 12%, var(--carto-elev));
+}
+
+.dirty-state.is-applying {
+  color: var(--carto-accent);
+  background: var(--carto-accent-soft);
 }
 
 button {
@@ -1602,6 +1726,7 @@ button:hover {
 }
 
 #status {
+  grid-column: 1 / -1;
   min-width: 0;
   overflow: hidden;
   color: var(--carto-text-mute);

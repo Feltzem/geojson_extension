@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_EDITOR_SETTINGS = void 0;
 exports.toWebviewPayload = toWebviewPayload;
 exports.fromWebviewText = fromWebviewText;
+exports.resolveWebviewEditText = resolveWebviewEditText;
 exports.normaliseEditorSettings = normaliseEditorSettings;
 exports.buildWebviewCsp = buildWebviewCsp;
 exports.activate = activate;
@@ -85,6 +86,14 @@ function fromWebviewText(webviewText) {
             ? error.message
             : "Edited GeoJSON has invalid syntax.");
     }
+}
+/**
+ * Text the webview marks as preformatted is fresh JSON.stringify(..., null, 2)
+ * output, so it is valid and formatted by construction; skipping the
+ * re-parse/re-format avoids blocking the extension host on large documents.
+ */
+function resolveWebviewEditText(webviewText, preformatted) {
+    return preformatted ? webviewText : fromWebviewText(webviewText);
 }
 function normaliseEditorSettings(rawSettings) {
     return {
@@ -151,6 +160,7 @@ class GeoJsonEditorProvider {
             ],
         };
         webview.html = this.getWebviewContent(webview);
+        let lastSavedText = document.getText();
         const updateWebview = () => {
             const payload = this.toWebviewPayload(document.getText());
             void webview.postMessage({
@@ -158,6 +168,8 @@ class GeoJsonEditorProvider {
                 text: payload.text,
                 format: "geojson",
                 error: payload.error ?? null,
+                version: document.version,
+                isDirty: document.isDirty,
             });
         };
         const updateWebviewSettings = () => {
@@ -171,6 +183,12 @@ class GeoJsonEditorProvider {
                 updateWebview();
             }
         });
+        const saveSubscription = vscode.workspace.onDidSaveTextDocument((savedDocument) => {
+            if (savedDocument.uri.toString() === documentKey) {
+                lastSavedText = savedDocument.getText();
+                updateWebview();
+            }
+        });
         const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration("geojsonVisualEditor", document.uri)) {
                 updateWebviewSettings();
@@ -178,9 +196,11 @@ class GeoJsonEditorProvider {
         });
         webviewPanel.onDidDispose(() => {
             changeSubscription.dispose();
+            saveSubscription.dispose();
             configurationSubscription.dispose();
         });
         webview.onDidReceiveMessage(async (message) => {
+            const requestId = typeof message?.requestId === "string" ? message.requestId : null;
             switch (message?.type) {
                 case "ready":
                     updateWebviewSettings();
@@ -189,12 +209,53 @@ class GeoJsonEditorProvider {
                 case "edit":
                     if (typeof message.text === "string") {
                         try {
-                            await this.persistWebviewText(document, message.text);
+                            await this.persistWebviewText(document, message.text, message.preformatted === true);
+                            void webview.postMessage({
+                                type: "editResult",
+                                requestId,
+                                ok: true,
+                                reason: typeof message.reason === "string" ? message.reason : null,
+                                version: document.version,
+                                isDirty: document.isDirty,
+                            });
                         }
                         catch (error) {
                             const messageText = error instanceof Error ? error.message : String(error);
+                            void webview.postMessage({
+                                type: "editResult",
+                                requestId,
+                                ok: false,
+                                reason: typeof message.reason === "string" ? message.reason : null,
+                                error: messageText,
+                                version: document.version,
+                                isDirty: document.isDirty,
+                            });
                             void vscode.window.showErrorMessage(`Unable to apply changes: ${messageText}`);
                         }
+                    }
+                    break;
+                case "revert":
+                    try {
+                        await this.replaceDocumentText(document, lastSavedText);
+                        void webview.postMessage({
+                            type: "revertResult",
+                            requestId,
+                            ok: true,
+                            version: document.version,
+                            isDirty: document.isDirty,
+                        });
+                    }
+                    catch (error) {
+                        const messageText = error instanceof Error ? error.message : String(error);
+                        void webview.postMessage({
+                            type: "revertResult",
+                            requestId,
+                            ok: false,
+                            error: messageText,
+                            version: document.version,
+                            isDirty: document.isDirty,
+                        });
+                        void vscode.window.showErrorMessage(`Unable to revert changes: ${messageText}`);
                     }
                     break;
                 default:
@@ -203,23 +264,24 @@ class GeoJsonEditorProvider {
         });
     }
     async replaceDocumentText(document, newText) {
-        const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+        const currentText = document.getText();
+        if (currentText === newText) {
+            return;
+        }
+        const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(currentText.length));
         const edit = new vscode.WorkspaceEdit();
         edit.replace(document.uri, fullRange, newText);
         const applied = await vscode.workspace.applyEdit(edit);
-        if (applied && document.isDirty) {
-            await document.save();
+        if (!applied) {
+            throw new Error("VS Code rejected the document edit.");
         }
     }
     toWebviewPayload(rawText) {
         return toWebviewPayload(rawText);
     }
-    async persistWebviewText(document, webviewText) {
-        const converted = this.fromWebviewText(webviewText);
+    async persistWebviewText(document, webviewText, preformatted = false) {
+        const converted = resolveWebviewEditText(webviewText, preformatted);
         await this.replaceDocumentText(document, converted);
-    }
-    fromWebviewText(webviewText) {
-        return fromWebviewText(webviewText);
     }
     getEditorSettings(resource) {
         const config = vscode.workspace.getConfiguration("geojsonVisualEditor", resource);
@@ -314,6 +376,12 @@ class GeoJsonEditorProvider {
               </span>
             </label>
 					</header>
+          <div class="panel-tabs" role="tablist" aria-label="Editor mode">
+            <button type="button" class="panel-tab is-active" role="tab" id="tab-edit" aria-selected="true" aria-controls="pane-edit" data-tab="edit">Edit</button>
+            <button type="button" class="panel-tab" role="tab" id="tab-style" aria-selected="false" aria-controls="pane-style" data-tab="style">Style</button>
+            <button type="button" class="panel-tab" role="tab" id="tab-data" aria-selected="false" aria-controls="pane-data" data-tab="data">Data</button>
+          </div>
+          <div class="tab-pane" id="pane-style" role="tabpanel" aria-labelledby="tab-style" data-tab="style">
           <section class="properties-group collapsible-section" aria-live="polite">
             <header class="group-header collapsible-header">
               <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="basemap-content">
@@ -479,6 +547,8 @@ class GeoJsonEditorProvider {
               </div>
             </div>
           </section>
+          </div>
+          <div class="tab-pane is-active" id="pane-edit" role="tabpanel" aria-labelledby="tab-edit" data-tab="edit">
           <section class="properties-group collapsible-section" aria-live="polite">
             <header class="group-header collapsible-header">
               <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="new-features-content">
@@ -510,6 +580,8 @@ class GeoJsonEditorProvider {
               </div>
             </div>
           </section>
+          </div>
+          <div class="tab-pane" id="pane-data" role="tabpanel" aria-labelledby="tab-data" data-tab="data">
           <section class="properties-group collapsible-section" aria-live="polite">
             <header class="group-header collapsible-header document-data-header">
               <button type="button" class="collapsible-toggle" aria-expanded="true" aria-controls="document-data-content">
@@ -561,12 +633,21 @@ class GeoJsonEditorProvider {
                 </div>
                 <button id="round-coordinates-btn" type="button" class="secondary-btn">Round coordinates</button>
               </div>
-              <div class="actions">
-                <button id="apply-btn" type="button">Apply changes</button>
-                <span id="status" role="status"></span>
-              </div>
             </div>
           </section>
+          </div>
+          <footer class="panel-footer">
+            <div class="actions">
+              <button id="apply-btn" type="button">Apply raw edits</button>
+              <div class="history-actions" aria-label="Edit history">
+                <button id="undo-btn" type="button" class="secondary-btn">Undo</button>
+                <button id="redo-btn" type="button" class="secondary-btn">Redo</button>
+                <button id="revert-btn" type="button" class="secondary-btn">Revert</button>
+              </div>
+              <span id="dirty-state" class="dirty-state" aria-live="polite">Saved</span>
+              <span id="status" role="status"></span>
+            </div>
+          </footer>
 				</section>
 			</div>
 			<script nonce="${nonce}" src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>

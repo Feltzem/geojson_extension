@@ -5,6 +5,7 @@ import {
   buildWebviewCsp,
   fromWebviewText,
   normaliseEditorSettings,
+  resolveWebviewEditText,
   toWebviewPayload,
 } from "../extension";
 
@@ -43,6 +44,35 @@ suite("GeoJSON Visual Editor", () => {
     );
   });
 
+  test("rejects invalid edited webview JSON before persisting", () => {
+    assert.throws(() => fromWebviewText("{ invalid"), /expected|invalid/i);
+  });
+
+  test("passes preformatted webview edits through without re-formatting", () => {
+    const preformatted = '{\n  "type": "FeatureCollection",\n  "features": []\n}';
+
+    assert.strictEqual(resolveWebviewEditText(preformatted, true), preformatted);
+  });
+
+  test("re-formats webview edits that are not marked preformatted", () => {
+    const text = resolveWebviewEditText(
+      '{"type":"FeatureCollection","features":[]}',
+      false,
+    );
+
+    assert.strictEqual(
+      text,
+      '{\n  "type": "FeatureCollection",\n  "features": []\n}',
+    );
+  });
+
+  test("still validates webview edits that are not marked preformatted", () => {
+    assert.throws(
+      () => resolveWebviewEditText("{ invalid", false),
+      /expected|invalid/i,
+    );
+  });
+
   test("allows Cartograph font loading in the webview CSP", () => {
     const csp = buildWebviewCsp("vscode-resource:", "nonce-value");
 
@@ -63,6 +93,7 @@ suite("GeoJSON Visual Editor", () => {
       defaultLabelsEnabled: true,
       defaultLabelFontFamily: "Open Sans Bold",
       defaultLabelSize: 16,
+      defaultCategoricalPalette: "pastel",
     });
 
     assert.deepStrictEqual(settings, {
@@ -75,6 +106,7 @@ suite("GeoJSON Visual Editor", () => {
       defaultLabelsEnabled: true,
       defaultLabelFontFamily: "Open Sans Bold",
       defaultLabelSize: 16,
+      defaultCategoricalPalette: "pastel",
     });
   });
 

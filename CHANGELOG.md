@@ -50,3 +50,7 @@ All notable changes to the "geojson-visual-editor" extension will be documented 
 
 - Tooltips: Dynamically widen the feature hover tooltip when a property value is long enough to wrap, expanding the popup to roughly double width before continuing to wrap so long values stay readable.
 - Categorical colour palettes: When colouring by a field, choose from four preset colour palettes, with the option to customise each category's colour individually
+
+## [0.8.0] - 2026-07-03
+
+- Performance improvements with opening large files

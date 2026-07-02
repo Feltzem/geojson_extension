@@ -17,6 +17,10 @@
   const labelPreviewValue = document.getElementById("label-preview-value");
   const labelPreviewMeta = document.getElementById("label-preview-meta");
   const applyButton = document.getElementById("apply-btn");
+  const undoButton = document.getElementById("undo-btn");
+  const redoButton = document.getElementById("redo-btn");
+  const revertButton = document.getElementById("revert-btn");
+  const dirtyStateNode = document.getElementById("dirty-state");
   const statusNode = document.getElementById("status");
   const propertiesContainer = document.getElementById("properties-container");
   const jsonEditor = document.querySelector(".json-editor");
@@ -326,6 +330,10 @@
   let pendingFocusKey = null;
   let mapHasData = false;
   let hasFitOnce = false;
+  // Whether the current "geojson-data" source supports MapLibre's
+  // GeoJSONSource#updateData() partial-update API. Re-detected every time
+  // the source is (re)created, e.g. on basemap/style switch.
+  let sourceSupportsUpdateData = false;
   let isEditingVertices = false;
   let snapVerticesEnabled = true;
   let vertexMarkers = [];
@@ -343,9 +351,26 @@
   let dismissedRawDataPopupReason = "";
   let toolbarDragState = null;
   let categoricalSettingsInitialised = false;
+  let latestDocumentText = "";
+  let latestDocumentVersion = 0;
+  let documentIsDirty = false;
+  let stagedRawEdit = false;
+  let stagedRawConflict = false;
+  let stagedRawBaseText = "";
+  let stagedRawBaseVersion = 0;
+  let requestCounter = 0;
+  let rawHistoryTimer = null;
   const maxVertexInsertDistancePx = 24;
   const maxVertexDeleteDistancePx = 16;
   const maxVertexSnapDistancePx = 14;
+  const historyState = {
+    entries: [],
+    index: -1,
+    totalBytes: 0,
+    maxEntries: 80,
+    maxBytes: 8 * 1024 * 1024,
+  };
+  const pendingDocumentRequests = new Map();
 
   const styleState = {
     fillColor: defaultEditorSettings.defaultFillColor,
@@ -400,15 +425,69 @@
 
     if (message.type === "update") {
       const text = typeof message.text === "string" ? message.text : "";
-      if (text !== currentText) {
-        currentText = text;
+      latestDocumentText = text;
+      latestDocumentVersion =
+        Number.isInteger(message.version) && message.version >= 0
+          ? message.version
+          : latestDocumentVersion;
+      documentIsDirty = Boolean(message.isDirty);
+
+      if (stagedRawEdit && !shouldAcceptDocumentUpdate(text)) {
+        stagedRawConflict = true;
+        setStatus(
+          "The file changed while raw edits are staged. Apply will overwrite the current document; Revert discards the staged raw edits.",
+          "error",
+        );
+        updateDirtyStateControls();
+        return;
       }
-      void loadTextIntoEditor(text, message.error);
+
+      // While raw edits are staged the map is stale relative to currentText,
+      // so a matching document update still needs the full reload below.
+      const wasStagedRawEdit = stagedRawEdit;
+      setRawEditStaged(false);
+
+      // When the document text already matches this webview's state (our own
+      // edit echoed back, or a save), skip the full re-parse/re-render.
+      if (
+        !message.error &&
+        !wasStagedRawEdit &&
+        currentGeoJson &&
+        text === currentText
+      ) {
+        pushHistorySnapshot(
+          historyState.entries.length ? "Document updated." : "Document loaded.",
+          "document",
+          currentText,
+          { explicit: true },
+        );
+        updateDirtyStateControls();
+        updateDocumentMetrics();
+        return;
+      }
+
+      void loadTextIntoEditor(text, message.error, {
+        historyLabel: historyState.entries.length
+          ? "Document updated."
+          : "Document loaded.",
+        preserveStatus: hasPendingDocumentRequests(),
+        recordHistory: true,
+      });
       return;
     }
 
     if (message.type === "settings") {
       applyEditorSettings(message.settings);
+      return;
+    }
+
+    if (message.type === "editResult") {
+      handleEditResult(message);
+      return;
+    }
+
+    if (message.type === "revertResult") {
+      handleRevertResult(message);
       return;
     }
   });
@@ -418,6 +497,394 @@
       dismissedRawDataPopupReason = activeRawDataPopupReason;
       hideRawDataPopup();
     });
+  }
+
+  function shouldAcceptDocumentUpdate(text) {
+    if (!stagedRawEdit) {
+      return true;
+    }
+    if (text === currentText) {
+      return true;
+    }
+    for (const request of pendingDocumentRequests.values()) {
+      if (request.type === "revert" || request.text === text) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function nextRequestId(prefix) {
+    requestCounter += 1;
+    return `${prefix}-${Date.now()}-${requestCounter}`;
+  }
+
+  function sendDocumentEdit(text, reason, options = {}) {
+    const requestId = nextRequestId("edit");
+    pendingDocumentRequests.set(requestId, {
+      type: "edit",
+      text,
+      reason,
+      source: options.source || "document",
+    });
+    updateDirtyStateControls();
+    vscode.postMessage({
+      type: "edit",
+      requestId,
+      reason,
+      text,
+      // True when text is fresh JSON.stringify(..., null, 2) output, letting
+      // the extension host skip a full re-parse/re-format of the document.
+      preformatted: options.preformatted === true,
+    });
+    return requestId;
+  }
+
+  function requestDocumentRevert() {
+    flushPendingRawHistory();
+    pushHistorySnapshot(
+      "Before revert.",
+      stagedRawEdit ? "raw" : "document",
+      currentText,
+      { explicit: true },
+    );
+
+    const requestId = nextRequestId("revert");
+    pendingDocumentRequests.set(requestId, {
+      type: "revert",
+      reason: "Revert to last saved file.",
+      source: "revert",
+    });
+    setStatus("Reverting to last saved file...", "");
+    updateDirtyStateControls();
+    vscode.postMessage({ type: "revert", requestId });
+  }
+
+  function handleEditResult(message) {
+    const requestId =
+      typeof message.requestId === "string" ? message.requestId : null;
+    const request = requestId ? pendingDocumentRequests.get(requestId) : null;
+    if (requestId) {
+      pendingDocumentRequests.delete(requestId);
+    }
+
+    if (Number.isInteger(message.version) && message.version >= 0) {
+      latestDocumentVersion = message.version;
+    }
+    if (typeof message.isDirty === "boolean") {
+      documentIsDirty = message.isDirty;
+    }
+
+    if (message.ok) {
+      if (typeof request?.text === "string") {
+        latestDocumentText = request.text;
+      }
+      if (request?.source === "raw-apply") {
+        setRawEditStaged(false);
+        setStatus(
+          "Raw edits applied to document. Save the file to write to disk.",
+          "success",
+        );
+      }
+      updateDirtyStateControls();
+      return;
+    }
+
+    if (request?.source === "raw-apply") {
+      setRawEditStaged(true);
+    }
+    const messageText =
+      typeof message.error === "string"
+        ? message.error
+        : "Unable to apply changes.";
+    setStatus(messageText, "error");
+    updateDirtyStateControls();
+  }
+
+  function handleRevertResult(message) {
+    const requestId =
+      typeof message.requestId === "string" ? message.requestId : null;
+    if (requestId) {
+      pendingDocumentRequests.delete(requestId);
+    }
+
+    if (Number.isInteger(message.version) && message.version >= 0) {
+      latestDocumentVersion = message.version;
+    }
+    if (typeof message.isDirty === "boolean") {
+      documentIsDirty = message.isDirty;
+    }
+
+    if (message.ok) {
+      setRawEditStaged(false);
+      setStatus("Reverted to last saved file.", "success");
+    } else {
+      const messageText =
+        typeof message.error === "string"
+          ? message.error
+          : "Unable to revert changes.";
+      setStatus(messageText, "error");
+    }
+    updateDirtyStateControls();
+  }
+
+  function hasPendingDocumentRequests() {
+    return pendingDocumentRequests.size > 0;
+  }
+
+  function setRawEditStaged(isStaged) {
+    const nextValue = Boolean(isStaged);
+    if (nextValue && !stagedRawEdit) {
+      stagedRawBaseText = latestDocumentText;
+      stagedRawBaseVersion = latestDocumentVersion;
+    }
+    stagedRawEdit = nextValue;
+    if (!stagedRawEdit) {
+      stagedRawConflict = false;
+      stagedRawBaseText = "";
+      stagedRawBaseVersion = latestDocumentVersion;
+    }
+    updateDirtyStateControls();
+  }
+
+  function markRawTextStaged(options = {}) {
+    const wasStaged = stagedRawEdit;
+    setRawEditStaged(true);
+    if (
+      stagedRawBaseVersion !== latestDocumentVersion ||
+      stagedRawBaseText !== latestDocumentText
+    ) {
+      stagedRawConflict = true;
+    }
+    if (!wasStaged) {
+      if (isEditingVertices) {
+        exitVertexEditMode();
+      }
+      updateAddFeatureButtonsState();
+      refreshSelectionState();
+    }
+    if (options.scheduleHistory !== false) {
+      scheduleRawHistorySnapshot();
+    }
+  }
+
+  function scheduleRawHistorySnapshot() {
+    if (rawEditorLargeMode) {
+      return;
+    }
+    if (rawHistoryTimer) {
+      window.clearTimeout(rawHistoryTimer);
+    }
+    rawHistoryTimer = window.setTimeout(() => {
+      rawHistoryTimer = null;
+      pushHistorySnapshot("Raw text edited.", "raw", currentText);
+    }, 750);
+  }
+
+  function flushPendingRawHistory() {
+    if (!rawHistoryTimer) {
+      return;
+    }
+    window.clearTimeout(rawHistoryTimer);
+    rawHistoryTimer = null;
+    pushHistorySnapshot("Raw text edited.", "raw", currentText);
+  }
+
+  function createHistorySnapshot(label, source, text) {
+    const snapshotText = typeof text === "string" ? text : "";
+    return {
+      text: snapshotText,
+      label: label || "Document updated.",
+      source: source === "raw" ? "raw" : "document",
+      selectedFeatureIndex: Number.isInteger(selectedFeatureIndex)
+        ? selectedFeatureIndex
+        : null,
+      bytes: getUtf8ByteLength(snapshotText),
+    };
+  }
+
+  function pushHistorySnapshot(label, source, text = currentText, options = {}) {
+    if (source === "raw" && rawEditorLargeMode && !options.explicit) {
+      updateHistoryControls();
+      return;
+    }
+
+    const snapshot = createHistorySnapshot(label, source, text);
+    const currentEntry = historyState.entries[historyState.index];
+    if (currentEntry && currentEntry.text === snapshot.text) {
+      currentEntry.label = snapshot.label;
+      currentEntry.source = snapshot.source;
+      currentEntry.selectedFeatureIndex = snapshot.selectedFeatureIndex;
+      updateHistoryControls();
+      return;
+    }
+
+    if (historyState.index < historyState.entries.length - 1) {
+      const removed = historyState.entries.splice(historyState.index + 1);
+      removed.forEach((entry) => {
+        historyState.totalBytes -= entry.bytes;
+      });
+    }
+
+    historyState.entries.push(snapshot);
+    historyState.index = historyState.entries.length - 1;
+    historyState.totalBytes += snapshot.bytes;
+
+    while (
+      historyState.entries.length > 1 &&
+      (historyState.entries.length > historyState.maxEntries ||
+        historyState.totalBytes > historyState.maxBytes)
+    ) {
+      const removed = historyState.entries.shift();
+      if (removed) {
+        historyState.totalBytes -= removed.bytes;
+        historyState.index = Math.max(0, historyState.index - 1);
+      }
+    }
+
+    updateHistoryControls();
+  }
+
+  function restoreHistory(delta) {
+    flushPendingRawHistory();
+    const nextIndex = historyState.index + delta;
+    if (nextIndex < 0 || nextIndex >= historyState.entries.length) {
+      updateHistoryControls();
+      return;
+    }
+
+    const snapshot = historyState.entries[nextIndex];
+    historyState.index = nextIndex;
+
+    if (snapshot.source === "raw") {
+      restoreRawHistorySnapshot(snapshot);
+    } else {
+      restoreDocumentHistorySnapshot(snapshot);
+    }
+    updateHistoryControls();
+  }
+
+  function restoreRawHistorySnapshot(snapshot) {
+    currentText = snapshot.text;
+    setEditorText(snapshot.text);
+    setRawEditStaged(snapshot.text !== latestDocumentText);
+    stagedRawConflict =
+      stagedRawEdit && stagedRawBaseVersion !== latestDocumentVersion;
+    updateDocumentMetrics();
+    setStatus(`${snapshot.label} Staged locally.`, "");
+  }
+
+  function restoreDocumentHistorySnapshot(snapshot) {
+    selectedFeatureIndex = snapshot.selectedFeatureIndex;
+    setRawEditStaged(false);
+    void loadTextIntoEditor(snapshot.text, null, { recordHistory: false });
+    if (snapshot.text !== latestDocumentText) {
+      sendDocumentEdit(snapshot.text, snapshot.label, { source: "history" });
+    }
+    setStatus(
+      `${snapshot.label} Document updated. Save the file to write to disk.`,
+      "",
+    );
+  }
+
+  function updateHistoryControls() {
+    if (undoButton) {
+      undoButton.disabled = historyState.index <= 0;
+    }
+    if (redoButton) {
+      redoButton.disabled =
+        historyState.index < 0 ||
+        historyState.index >= historyState.entries.length - 1;
+    }
+  }
+
+  function updateDirtyStateControls() {
+    const hasPending = hasPendingDocumentRequests();
+    let label = "Saved";
+    let stateClass = "";
+
+    if (hasPending) {
+      label = "Applying changes";
+      stateClass = "is-applying";
+    } else if (stagedRawConflict) {
+      label = "Raw edits conflict";
+      stateClass = "is-conflict";
+    } else if (stagedRawEdit && documentIsDirty) {
+      label = "Raw edits staged + unsaved document";
+      stateClass = "is-staged";
+    } else if (stagedRawEdit) {
+      label = "Raw edits staged";
+      stateClass = "is-staged";
+    } else if (documentIsDirty) {
+      label = "Unsaved document changes";
+      stateClass = "is-dirty";
+    }
+
+    if (dirtyStateNode) {
+      dirtyStateNode.textContent = label;
+      dirtyStateNode.classList.remove(
+        "is-dirty",
+        "is-staged",
+        "is-conflict",
+        "is-error",
+        "is-applying",
+      );
+      if (stateClass) {
+        dirtyStateNode.classList.add(stateClass);
+      }
+    }
+
+    if (applyButton) {
+      applyButton.disabled = !stagedRawEdit || hasPending;
+      applyButton.title = stagedRawEdit
+        ? "Apply staged raw text to the VS Code document."
+        : "No staged raw edits to apply.";
+    }
+    if (revertButton) {
+      revertButton.disabled =
+        hasPending || (!stagedRawEdit && !documentIsDirty);
+      revertButton.title = "Revert to the last saved file text.";
+    }
+    updateHistoryControls();
+  }
+
+  function hasBlockingRawEdit(action) {
+    if (!stagedRawEdit) {
+      return false;
+    }
+    setStatus(`Apply or revert staged raw edits before ${action}.`, "error");
+    return true;
+  }
+
+  function isHistoryShortcutTarget(target) {
+    if (!(target instanceof Element)) {
+      return false;
+    }
+    if (target.closest("input, textarea, select, [contenteditable='true']")) {
+      return true;
+    }
+    return Boolean(target.closest(".cartograph-select"));
+  }
+
+  function handleHistoryShortcut(event) {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+      return;
+    }
+    if (isHistoryShortcutTarget(event.target)) {
+      return;
+    }
+
+    const key = String(event.key || "").toLowerCase();
+    if (key === "z" && event.shiftKey) {
+      event.preventDefault();
+      restoreHistory(1);
+    } else if (key === "z") {
+      event.preventDefault();
+      restoreHistory(-1);
+    } else if (key === "y") {
+      event.preventDefault();
+      restoreHistory(1);
+    }
   }
 
   function initialiseCustomSelects() {
@@ -692,6 +1159,13 @@
   }
 
   applyButton.addEventListener("click", () => {
+    flushPendingRawHistory();
+    if (!stagedRawEdit) {
+      setStatus("No staged raw edits to apply.", "");
+      updateDirtyStateControls();
+      return;
+    }
+
     const nextText = textArea.value;
     if (!nextText || !nextText.trim().length) {
       setStatus("GeoJSON cannot be empty.", "error");
@@ -714,19 +1188,44 @@
       populateAttributeOptions(collection);
       applyColouring(attributeSelect.value);
       applyLabels();
+      setRawEditStaged(false);
       refreshSelectionState();
       updateAddFeatureButtonsState();
-      setStatus("Changes applied locally. Saving...", "");
-      vscode.postMessage({ type: "edit", text: serialised });
+      pushHistorySnapshot("Raw edits applied.", "document", serialised, {
+        explicit: true,
+      });
+      setStatus("Applying raw edits to the document...", "");
+      sendDocumentEdit(serialised, "Raw edits applied.", {
+        source: "raw-apply",
+        preformatted: true,
+      });
       const successMessage = notice
-        ? `Saved to workspace. ${notice}`
-        : "Saved to workspace.";
-      setStatus(successMessage.trim(), "success");
+        ? [
+            "Raw edits applied to document.",
+            notice,
+            "Save the file to write to disk.",
+          ].join(" ")
+        : "Raw edits applied to document. Save the file to write to disk.";
+      setStatus(successMessage.trim(), "");
       updateDocumentMetrics();
     } catch (error) {
       setStatus(formatError(error), "error");
     }
   });
+
+  if (undoButton) {
+    undoButton.addEventListener("click", () => restoreHistory(-1));
+  }
+
+  if (redoButton) {
+    redoButton.addEventListener("click", () => restoreHistory(1));
+  }
+
+  if (revertButton) {
+    revertButton.addEventListener("click", requestDocumentRevert);
+  }
+
+  document.addEventListener("keydown", handleHistoryShortcut);
 
   if (basemapSelect) {
     basemapSelect.addEventListener("change", () => {
@@ -979,8 +1478,13 @@
   updateOpacityControls();
   updateLabelControls();
   initialiseCollapsibleSections();
+  initialiseTabs();
 
   addPropertyButton.addEventListener("click", () => {
+    if (hasBlockingRawEdit("editing properties")) {
+      return;
+    }
+
     const feature = getSelectedFeature();
     if (!feature) {
       setStatus("Select a feature on the map to add properties.", "");
@@ -995,6 +1499,10 @@
   });
 
   editVerticesButton.addEventListener("click", () => {
+    if (hasBlockingRawEdit("editing vertices")) {
+      return;
+    }
+
     const feature = getSelectedFeature();
     if (!feature) {
       setStatus("Select a feature on the map to edit vertices.", "");
@@ -1044,6 +1552,7 @@
 
   updateDocumentFormatUI();
   updateBasemapControlsState();
+  updateDirtyStateControls();
 
   function initialiseCollapsibleSections() {
     collapsibleToggles.forEach((toggle) => {
@@ -1055,6 +1564,36 @@
         const willExpand = section.classList.contains("collapsed");
         section.classList.toggle("collapsed", !willExpand);
         toggle.setAttribute("aria-expanded", willExpand ? "true" : "false");
+      });
+    });
+  }
+
+  function initialiseTabs() {
+    const tabButtons = Array.from(document.querySelectorAll(".panel-tab"));
+    const panes = Array.from(document.querySelectorAll(".tab-pane"));
+    if (!tabButtons.length || !panes.length) {
+      return;
+    }
+
+    function activateTab(name) {
+      tabButtons.forEach((button) => {
+        const isActive = button.dataset.tab === name;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-selected", isActive ? "true" : "false");
+      });
+      panes.forEach((pane) => {
+        pane.classList.toggle("is-active", pane.dataset.tab === name);
+      });
+      if (name === "data") {
+        // The highlight overlay measures layout, so refresh it now that the
+        // editor is visible and sized to full height.
+        updateJsonHighlight(textArea.value || "");
+      }
+    }
+
+    tabButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activateTab(button.dataset.tab);
       });
     });
   }
@@ -1549,7 +2088,7 @@
     }
     if (editVerticesButton) {
       const hasSelection = Boolean(getSelectedFeature());
-      editVerticesButton.disabled = !mapReady || !hasSelection;
+      editVerticesButton.disabled = !mapReady || !hasSelection || stagedRawEdit;
       editVerticesButton.classList.toggle("active", isEditingVertices);
       editVerticesButton.setAttribute(
         "aria-pressed",
@@ -1558,6 +2097,14 @@
       editVerticesButton.textContent = isEditingVertices
         ? "Stop editing"
         : "Edit vertices";
+      if (stagedRawEdit) {
+        editVerticesButton.setAttribute(
+          "title",
+          "Apply or revert staged raw edits before editing vertices.",
+        );
+      } else {
+        editVerticesButton.removeAttribute("title");
+      }
     }
     if (snapVerticesButton) {
       snapVerticesButton.hidden = !isEditingVertices;
@@ -1947,15 +2494,23 @@
   }
 
   function updateAddFeatureButtonsState() {
-    const shouldDisable = !mapReady;
+    const shouldDisable = !mapReady || stagedRawEdit;
 
     addFeatureButtons.forEach(({ element }) => {
       if (!element) {
         return;
       }
       element.disabled = shouldDisable;
-      element.removeAttribute("title");
-      element.removeAttribute("aria-disabled");
+      if (stagedRawEdit) {
+        element.setAttribute(
+          "title",
+          "Apply or revert staged raw edits before adding features.",
+        );
+        element.setAttribute("aria-disabled", "true");
+      } else {
+        element.removeAttribute("title");
+        element.removeAttribute("aria-disabled");
+      }
     });
     updateMapToolbarState();
   }
@@ -1983,17 +2538,39 @@
       return;
     }
 
-    editVerticesButton.disabled = false;
+    editVerticesButton.disabled = stagedRawEdit;
     if (deleteFeatureButton) {
-      deleteFeatureButton.disabled = false;
+      deleteFeatureButton.disabled = stagedRawEdit;
     }
     editVerticesButton.textContent = isEditingVertices
       ? "Stop editing"
       : "Edit vertices";
 
-    addPropertyButton.disabled = false;
-    addPropertyButton.removeAttribute("aria-disabled");
-    addPropertyButton.removeAttribute("title");
+    addPropertyButton.disabled = stagedRawEdit;
+    if (stagedRawEdit) {
+      addPropertyButton.setAttribute("aria-disabled", "true");
+      addPropertyButton.setAttribute(
+        "title",
+        "Apply or revert staged raw edits before editing properties.",
+      );
+      editVerticesButton.setAttribute(
+        "title",
+        "Apply or revert staged raw edits before editing vertices.",
+      );
+      if (deleteFeatureButton) {
+        deleteFeatureButton.setAttribute(
+          "title",
+          "Apply or revert staged raw edits before deleting features.",
+        );
+      }
+    } else {
+      addPropertyButton.removeAttribute("aria-disabled");
+      addPropertyButton.removeAttribute("title");
+      editVerticesButton.removeAttribute("title");
+      if (deleteFeatureButton) {
+        deleteFeatureButton.removeAttribute("title");
+      }
+    }
 
     const properties = sanitizeProperties(feature.properties);
     const entries = Object.entries(properties);
@@ -2006,6 +2583,11 @@
 
     for (const [key, value] of entries) {
       const row = createPropertyRow(key, value);
+      if (stagedRawEdit) {
+        row.querySelectorAll("input, button").forEach((control) => {
+          control.disabled = true;
+        });
+      }
       propertiesContainer.appendChild(row);
     }
 
@@ -2055,6 +2637,11 @@
   }
 
   function renameProperty(row, input) {
+    if (hasBlockingRawEdit("editing properties")) {
+      input.value = row.dataset.key || "";
+      return;
+    }
+
     const feature = getSelectedFeature();
     if (!feature) {
       return;
@@ -2088,6 +2675,15 @@
   }
 
   function updatePropertyValue(row, input) {
+    if (hasBlockingRawEdit("editing properties")) {
+      const feature = getSelectedFeature();
+      const key = row.dataset.key;
+      if (feature && key) {
+        input.value = serialiseValue(ensureProperties(feature)[key]);
+      }
+      return;
+    }
+
     const feature = getSelectedFeature();
     if (!feature) {
       return;
@@ -2104,6 +2700,10 @@
   }
 
   function removeProperty(row) {
+    if (hasBlockingRawEdit("editing properties")) {
+      return;
+    }
+
     const feature = getSelectedFeature();
     if (!feature) {
       return;
@@ -2123,27 +2723,68 @@
     if (!currentGeoJson) {
       return;
     }
+    if (hasBlockingRawEdit("visual editing")) {
+      return;
+    }
 
     const rounded = roundFeatureCollection(currentGeoJson, coordinatePrecision);
     const { collection, notice } = enforceFormatConstraints(rounded);
-    setCurrentGeoJson(collection);
+    const statusMessage = notice ? `${message} ${notice}` : message;
+    commitGeoJsonCollection(collection, statusMessage.trim(), {
+      forceFit: Boolean(options.forceFit),
+      source: "visual",
+      addedIndex: options.addedIndex,
+    });
+  }
+
+  function commitGeoJsonCollection(collection, message, options = {}) {
+    const { forceFit = false, source = "visual", addedIndex } = options;
     const serialised = JSON.stringify(collection, null, 2);
+    setRawEditStaged(false);
+    setCurrentGeoJson(collection);
     currentText = serialised;
     setEditorText(serialised);
-    const { forceFit = false } = options;
-    updateMap(collection, { forceFit });
+
+    // A single appended feature is the one case where a commit's map update
+    // can skip re-decorating/re-sending every other feature: array order is
+    // stable (features are always pushed at the end), so the new feature's
+    // rounded/committed form can be diffed in directly.
+    const addedFeature = Number.isInteger(addedIndex)
+      ? collection.features?.[addedIndex]
+      : null;
+    const diffSource =
+      addedFeature?.geometry &&
+      sourceSupportsUpdateData &&
+      map.getSource("geojson-data");
+    if (diffSource) {
+      diffSource.updateData({
+        add: [decorateMapFeature(addedFeature, addedIndex)],
+      });
+      const hadNoFeatures = !mapHasData;
+      mapHasData = true;
+      if (forceFit || hadNoFeatures) {
+        fitMapToAnalysedBounds();
+        hasFitOnce = true;
+      }
+      refreshSelectionHighlight();
+      updateMapToolbarState();
+      scheduleInstrumentUpdate();
+    } else {
+      updateMap(collection, { forceFit });
+    }
     populateAttributeOptions(collection);
     updateStyleControlAvailability(collection);
     applyColouring(attributeSelect.value);
     applyLabels();
     updateAddFeatureButtonsState();
-    const statusMessage = notice ? `${message} ${notice}` : message;
-    setStatus(
-      `${statusMessage.trim()} Apply changes to save to disk.`,
-      "",
-    );
     refreshSelectionState();
     updateDocumentMetrics();
+    pushHistorySnapshot(message, "document", serialised, { explicit: true });
+    sendDocumentEdit(serialised, message, { source, preformatted: true });
+    setStatus(
+      `${message} Document updated. Save the file to write to disk.`,
+      "",
+    );
   }
 
   function ensureProperties(feature) {
@@ -2184,9 +2825,20 @@
     documentAnalysis = analysis || analyseFeatureCollection(collection);
   }
 
-  async function loadTextIntoEditor(text, externalError = null) {
+  async function loadTextIntoEditor(text, externalError = null, options = {}) {
     const requestId = ++loadRequestId;
     const isLargeLoad = isLargeRawDocument(text);
+    const isCancelled = () => requestId !== loadRequestId;
+    const perfStages = [];
+    let perfLast = performance.now();
+    const markPerf = (stage) => {
+      if (!isLargeLoad) {
+        return;
+      }
+      const now = performance.now();
+      perfStages.push(`${stage} ${Math.round(now - perfLast)}ms`);
+      perfLast = now;
+    };
     if (isLargeLoad) {
       hideMapLoading();
       showLargeFileLoading(
@@ -2204,20 +2856,27 @@
       setLoading(true);
     }
 
-    await nextAnimationFrame();
-    if (requestId !== loadRequestId) {
+    // Let the loading overlay paint before any heavy synchronous work starts.
+    await yieldToPaint();
+    if (isCancelled()) {
       return;
     }
+    markPerf("overlay");
 
     if (isLargeLoad) {
       updateLargeFileLoading(
-        12,
+        8,
         "Preparing raw editor",
         "Keeping the document editable while skipping expensive syntax highlighting.",
       );
+      await yieldToPaint();
+      if (isCancelled()) {
+        return;
+      }
     }
     setEditorText(text);
     currentText = text;
+    markPerf("raw editor");
 
     if (!text) {
       setCurrentGeoJson(null);
@@ -2230,17 +2889,29 @@
       setLoading(false);
       updateAddFeatureButtonsState();
       updateDocumentMetrics();
+      if (options.recordHistory !== false) {
+        pushHistorySnapshot(
+          options.historyLabel || "Document loaded.",
+          "document",
+          currentText,
+          { explicit: true },
+        );
+      }
+      updateDirtyStateControls();
       return;
     }
 
     try {
       if (isLargeLoad) {
         updateLargeFileLoading(
-          24,
+          14,
           "Parsing GeoJSON",
           "Reading features and geometry from the document.",
         );
-        await nextAnimationFrame();
+        await yieldToPaint();
+        if (isCancelled()) {
+          return;
+        }
       }
       const parsed = JSON.parse(text);
       const normalised = normaliseGeoJson(parsed);
@@ -2248,6 +2919,7 @@
         throw new Error("Unsupported GeoJSON structure.");
       }
       const { collection, notice } = enforceFormatConstraints(normalised);
+      markPerf("parse");
 
       let analysis = null;
       if (isLargeLoad) {
@@ -2255,16 +2927,33 @@
           collection,
           ({ progress, processed, total }) => {
             updateLargeFileLoading(
-              32 + progress * 0.34,
+              28 + progress * 0.24,
               "Scanning features",
               `Analysed ${processed.toLocaleString()} of ${total.toLocaleString()} features.`,
             );
           },
-          () => requestId !== loadRequestId,
+          isCancelled,
         );
-        if (requestId !== loadRequestId) {
+        if (isCancelled() || !analysis) {
           return;
         }
+        markPerf("scan");
+
+        const prepared = await prepareMapDataAsync(
+          collection,
+          ({ processed, total }) => {
+            updateLargeFileLoading(
+              52 + (total ? processed / total : 1) * 20,
+              "Preparing map data",
+              `Prepared ${processed.toLocaleString()} of ${total.toLocaleString()} features for rendering.`,
+            );
+          },
+          isCancelled,
+        );
+        if (isCancelled() || !prepared) {
+          return;
+        }
+        markPerf("prepare");
       }
 
       if (!isLargeLoad) {
@@ -2278,20 +2967,33 @@
       const shouldForceFit = !hasFitOnce;
       if (isLargeLoad) {
         updateLargeFileLoading(
-          72,
+          74,
           "Rendering map layers",
           `${documentAnalysis.featureCount.toLocaleString()} features ready for MapLibre.`,
         );
-        await nextAnimationFrame();
+        await yieldToPaint();
+        if (isCancelled()) {
+          return;
+        }
       }
       updateMap(collection, { forceFit: shouldForceFit });
       if (isLargeLoad) {
+        // Hold the progress bar until MapLibre's worker has ingested the
+        // data, so 100% means the map is actually usable.
+        await waitForMapSourceLoaded("geojson-data");
+        if (isCancelled()) {
+          return;
+        }
+        markPerf("render");
         updateLargeFileLoading(
-          86,
+          92,
           "Syncing controls",
           "Building attribute, label, and styling controls from the cached scan.",
         );
-        await nextAnimationFrame();
+        await yieldToPaint();
+        if (isCancelled()) {
+          return;
+        }
       }
       populateAttributeOptions(collection);
       updateStyleControlAvailability(collection);
@@ -2306,18 +3008,30 @@
         setStatus(externalError, "error");
       } else if (notice) {
         setStatus(notice, "");
-      } else {
+      } else if (!options.preserveStatus) {
         clearStatus();
       }
       if (isLargeLoad) {
+        markPerf("controls");
         updateLargeFileLoading(
           100,
           "Ready",
           `Loaded ${documentAnalysis.featureCount.toLocaleString()} features in large-file mode.`,
         );
-        await nextAnimationFrame();
+        console.debug(
+          `[geojson-editor] large load (${formatBytes(text.length)}): ${perfStages.join(", ")}`,
+        );
+        await yieldToPaint();
       }
       updateDocumentMetrics();
+      if (options.recordHistory !== false) {
+        pushHistorySnapshot(
+          options.historyLabel || "Document updated.",
+          "document",
+          currentText,
+          { explicit: true },
+        );
+      }
     } catch (error) {
       const errorMessage = formatError(error);
       setCurrentGeoJson(null);
@@ -2331,6 +3045,14 @@
         "Raw document data shown",
         "The document could not be formatted as supported GeoJSON, so the original text is shown for editing.",
       );
+      if (options.recordHistory !== false) {
+        pushHistorySnapshot(
+          options.historyLabel || "Document updated.",
+          "document",
+          currentText,
+          { explicit: true },
+        );
+      }
     } finally {
       if (requestId === loadRequestId) {
         if (isLargeLoad) {
@@ -2340,13 +3062,19 @@
         }
         updateAddFeatureButtonsState();
         updateDocumentMetrics();
+        updateDirtyStateControls();
       }
     }
   }
 
-  function nextAnimationFrame() {
+  // Resolves after the browser has actually painted a frame. Awaiting only
+  // requestAnimationFrame resumes *before* the paint, so any synchronous work
+  // that follows blocks the very frame it was waiting for.
+  function yieldToPaint() {
     return new Promise((resolve) => {
-      window.requestAnimationFrame(() => resolve());
+      window.requestAnimationFrame(() => {
+        window.setTimeout(resolve, 0);
+      });
     });
   }
 
@@ -2373,7 +3101,13 @@
       map.addSource(sourceId, {
         type: "geojson",
         data: prepared,
+        // Lets updateData() address individual features by their
+        // (already-existing) __editorIndex property instead of requiring a
+        // top-level GeoJSON Feature.id.
+        promoteId: "__editorIndex",
       });
+      sourceSupportsUpdateData =
+        typeof map.getSource(sourceId)?.updateData === "function";
 
       map.addLayer({
         id: "geojson-fill",
@@ -2703,6 +3437,8 @@
       numericRanges: new Map(),
       hasLineGeometry: false,
       labelPreviewValues: new Map(),
+      // Lazily filled by getCategoricalValues; recreated with each analysis.
+      categoricalValues: new Map(),
     };
   }
 
@@ -2720,6 +3456,9 @@
     return finalizeDocumentAnalysis(builder);
   }
 
+  // Budget for synchronous work between paints while chunking long loops.
+  const chunkSliceBudgetMs = 24;
+
   async function analyseFeatureCollectionAsync(
     data,
     onProgress,
@@ -2731,27 +3470,30 @@
     }
 
     const total = builder.features.length;
-    const chunkSize = Math.max(250, Math.ceil(Math.max(total, 1) / 40));
+    let sliceStart = performance.now();
 
     while (builder.index < total) {
-      if (shouldCancel?.()) {
-        return null;
+      processAnalysisFeature(builder, builder.features[builder.index]);
+      builder.index += 1;
+
+      if (
+        (builder.index & 511) === 0 &&
+        performance.now() - sliceStart >= chunkSliceBudgetMs
+      ) {
+        onProgress?.({
+          progress: total ? (builder.index / total) * 100 : 100,
+          processed: builder.index,
+          total,
+        });
+        await yieldToPaint();
+        if (shouldCancel?.()) {
+          return null;
+        }
+        sliceStart = performance.now();
       }
-
-      const endIndex = Math.min(total, builder.index + chunkSize);
-      for (; builder.index < endIndex; builder.index += 1) {
-        processAnalysisFeature(builder, builder.features[builder.index]);
-      }
-
-      onProgress?.({
-        progress: total ? (builder.index / total) * 100 : 100,
-        processed: builder.index,
-        total,
-      });
-
-      await nextAnimationFrame();
     }
 
+    onProgress?.({ progress: 100, processed: total, total });
     return finalizeDocumentAnalysis(builder);
   }
 
@@ -2957,7 +3699,32 @@
     );
   }
 
+  // Decorated map data keyed by the collection object passed to updateMap.
+  // Commits always build a fresh collection, so entries expire naturally;
+  // in-place geometry mutations (vertex drags) stay visible because the
+  // decorated features share geometry references with the source features.
+  const preparedMapDataCache = new WeakMap();
+
+  function decorateMapFeature(feature, index) {
+    return {
+      type: "Feature",
+      geometry: feature.geometry || null,
+      properties: {
+        ...sanitizeProperties(feature.properties),
+        __editorIndex: index,
+      },
+    };
+  }
+
   function prepareMapData(data) {
+    if (!data || typeof data !== "object") {
+      return null;
+    }
+    const cached = preparedMapDataCache.get(data);
+    if (cached) {
+      return cached;
+    }
+
     const collection = normaliseGeoJson(data);
     if (!collection) {
       return null;
@@ -2966,16 +3733,93 @@
     const features = Array.isArray(collection.features)
       ? collection.features
       : [];
-    const decorated = features.map((feature, index) => ({
-      type: "Feature",
-      geometry: feature.geometry || null,
-      properties: {
-        ...sanitizeProperties(feature.properties),
-        __editorIndex: index,
-      },
-    }));
+    const prepared = {
+      type: "FeatureCollection",
+      features: features.map(decorateMapFeature),
+    };
+    preparedMapDataCache.set(data, prepared);
+    return prepared;
+  }
 
-    return { type: "FeatureCollection", features: decorated };
+  async function prepareMapDataAsync(data, onProgress, shouldCancel) {
+    if (!data || typeof data !== "object") {
+      return null;
+    }
+    const cached = preparedMapDataCache.get(data);
+    if (cached) {
+      return cached;
+    }
+
+    const collection = normaliseGeoJson(data);
+    if (!collection) {
+      return null;
+    }
+
+    const features = Array.isArray(collection.features)
+      ? collection.features
+      : [];
+    const total = features.length;
+    const decorated = new Array(total);
+    let sliceStart = performance.now();
+
+    for (let index = 0; index < total; index += 1) {
+      decorated[index] = decorateMapFeature(features[index], index);
+
+      if (
+        (index & 511) === 511 &&
+        performance.now() - sliceStart >= chunkSliceBudgetMs
+      ) {
+        onProgress?.({ processed: index + 1, total });
+        await yieldToPaint();
+        if (shouldCancel?.()) {
+          return null;
+        }
+        sliceStart = performance.now();
+      }
+    }
+
+    onProgress?.({ processed: total, total });
+    const prepared = { type: "FeatureCollection", features: decorated };
+    preparedMapDataCache.set(data, prepared);
+    return prepared;
+  }
+
+  // Resolves once MapLibre's worker has finished ingesting the given source,
+  // or after a timeout so a network/worker stall can never wedge the loader.
+  function waitForMapSourceLoaded(sourceId, timeoutMs = 15000) {
+    return new Promise((resolve) => {
+      if (!mapReady || !map || !map.getSource(sourceId)) {
+        resolve(false);
+        return;
+      }
+
+      try {
+        if (map.isSourceLoaded(sourceId)) {
+          resolve(true);
+          return;
+        }
+      } catch (error) {
+        resolve(false);
+        return;
+      }
+
+      let timer = null;
+      const onSourceData = (event) => {
+        if (event.sourceId === sourceId && event.isSourceLoaded) {
+          finish(true);
+        }
+      };
+      const finish = (ok) => {
+        map.off("sourcedata", onSourceData);
+        if (timer) {
+          window.clearTimeout(timer);
+          timer = null;
+        }
+        resolve(ok);
+      };
+      map.on("sourcedata", onSourceData);
+      timer = window.setTimeout(() => finish(false), timeoutMs);
+    });
   }
 
   function refreshSelectionHighlight() {
@@ -3135,28 +3979,10 @@
     }
 
     const palette = getActivePalette();
-    const features = collectFeatures(currentGeoJson);
-    const seen = new Set();
-    const values = [];
-
-    for (const feature of features) {
-      const props = sanitizeProperties(feature.properties);
-      if (!(attribute in props)) {
-        continue;
-      }
-      const raw = props[attribute];
-      if (raw === null || typeof raw === "object") {
-        continue;
-      }
-      const value = String(raw);
-      if (!seen.has(value)) {
-        seen.add(value);
-        values.push(value);
-      }
-      if (values.length >= palette.length * 3) {
-        break;
-      }
-    }
+    const values = getCategoricalValues(attribute).slice(
+      0,
+      palette.length * 3,
+    );
 
     if (!values.length) {
       resetColours();
@@ -3620,6 +4446,51 @@
     return documentAnalysis.numericRanges.get(attribute) || null;
   }
 
+  // All palettes have 12 colours; matches the palette.length * 3 cap used
+  // when building the categorical match expression.
+  const categoricalValueScanLimit = 36;
+
+  // Distinct values for an attribute, scanned once per document analysis and
+  // cached so legend swatch edits and palette switches stay O(1).
+  function getCategoricalValues(attribute) {
+    if (!attribute) {
+      return [];
+    }
+    const cache = documentAnalysis.categoricalValues;
+    const cachedValues = cache.get(attribute);
+    if (cachedValues) {
+      return cachedValues;
+    }
+
+    const seen = new Set();
+    const values = [];
+    for (const feature of collectFeatures(currentGeoJson)) {
+      const properties = feature?.properties;
+      if (!properties || typeof properties !== "object") {
+        continue;
+      }
+      const raw = properties[attribute];
+      if (
+        raw === null ||
+        typeof raw === "undefined" ||
+        typeof raw === "object"
+      ) {
+        continue;
+      }
+      const value = String(raw);
+      if (!seen.has(value)) {
+        seen.add(value);
+        values.push(value);
+        if (values.length >= categoricalValueScanLimit) {
+          break;
+        }
+      }
+    }
+
+    cache.set(attribute, values);
+    return values;
+  }
+
   function containsLineGeometry(data) {
     return data === currentGeoJson
       ? documentAnalysis.hasLineGeometry
@@ -3729,24 +4600,14 @@
 
       const rounded = roundFeatureCollection(normalised, coordinatePrecision);
       const { collection, notice } = enforceFormatConstraints(rounded);
-      const serialised = JSON.stringify(collection, null, 2);
-
-      setCurrentGeoJson(collection);
-      currentText = serialised;
-      setEditorText(serialised);
-      updateMap(collection);
-      populateAttributeOptions(collection);
-      updateStyleControlAvailability(collection);
-      applyColouring(attributeSelect.value);
-      applyLabels();
-      refreshSelectionState();
-      updateDocumentMetrics();
 
       const suffix = coordinatePrecision === 1 ? "place" : "places";
       const statusMessage = notice
         ? `${notice} Coordinates rounded to ${coordinatePrecision} decimal ${suffix}.`
         : `Coordinates rounded to ${coordinatePrecision} decimal ${suffix}.`;
-      setStatus(`${statusMessage} Apply changes to save to disk.`, "");
+      commitGeoJsonCollection(collection, statusMessage, {
+        source: "rounding",
+      });
     } catch (error) {
       setStatus(formatError(error), "error");
     }
@@ -4041,8 +4902,9 @@
       nextText,
       nextSelectionStart,
       nextSelectionEnd,
+      "Replaced 1 match.",
     );
-    setStatus("Replaced 1 match. Apply changes to save to disk.", "");
+    setStatus("Replaced 1 match. Raw edits staged.", "");
   }
 
   function replaceAllRawMatches() {
@@ -4061,9 +4923,14 @@
     });
     nextText += textArea.value.slice(cursor);
 
-    updateRawEditorTextAfterReplace(nextText, 0, 0);
+    updateRawEditorTextAfterReplace(
+      nextText,
+      0,
+      0,
+      `Replaced ${matchCount} ${matchCount === 1 ? "match" : "matches"}.`,
+    );
     setStatus(
-      `Replaced ${matchCount} ${matchCount === 1 ? "match" : "matches"}. Apply changes to save to disk.`,
+      `Replaced ${matchCount} ${matchCount === 1 ? "match" : "matches"}. Raw edits staged.`,
       "",
     );
   }
@@ -4076,10 +4943,15 @@
     nextText,
     selectionStart,
     selectionEnd,
+    historyLabel,
   ) {
     currentText = nextText;
     textArea.value = nextText;
     textArea.setSelectionRange(selectionStart, selectionEnd);
+    markRawTextStaged({ scheduleHistory: false });
+    pushHistorySnapshot(historyLabel || "Raw text edited.", "raw", nextText, {
+      explicit: true,
+    });
     refreshRawFindMatches();
     scrollRawEditorToMatch({ start: selectionStart, end: selectionEnd });
     updateJsonHighlight(nextText);
@@ -4094,6 +4966,7 @@
 
     textArea.addEventListener("input", () => {
       currentText = textArea.value;
+      markRawTextStaged();
       refreshRawFindMatches();
       updateJsonHighlight(currentText);
       syncJsonHighlightScroll();
@@ -4368,11 +5241,20 @@
     updateMapToolbarState();
   }
 
+  let sharedTextEncoder = null;
+
   function getUtf8ByteLength(value) {
+    const text = String(value ?? "");
+    // GeoJSON text is overwhelmingly ASCII; skip encoding huge documents
+    // just for history/metrics bookkeeping.
+    if (text.length > 4_000_000) {
+      return text.length;
+    }
     try {
-      return new TextEncoder().encode(value).length;
+      sharedTextEncoder = sharedTextEncoder || new TextEncoder();
+      return sharedTextEncoder.encode(text).length;
     } catch (error) {
-      return value.length;
+      return text.length;
     }
   }
 
@@ -4528,6 +5410,10 @@
   }
 
   function addFeatureOfType(type) {
+    if (hasBlockingRawEdit("adding features")) {
+      return;
+    }
+
     if (!mapReady) {
       setStatus("Map is not ready yet. Try again in a moment.", "error");
       return;
@@ -4552,10 +5438,17 @@
     currentGeoJson.features.push(newFeature);
     selectedFeatureIndex = currentGeoJson.features.length - 1;
     exitVertexEditMode();
-    commitPropertyChanges(`${type} added.`, { forceFit: true });
+    commitPropertyChanges(`${type} added.`, {
+      forceFit: true,
+      addedIndex: selectedFeatureIndex,
+    });
   }
 
   function deleteSelectedFeature() {
+    if (hasBlockingRawEdit("deleting features")) {
+      return;
+    }
+
     if (!currentGeoJson || !Array.isArray(currentGeoJson.features)) {
       setStatus("No features available to delete.", "");
       return;
@@ -4701,13 +5594,14 @@
             nextCoordinate,
           );
 
-          // Update map geometry live while dragging.
-          updateMap(currentGeoJson);
+          // Update map geometry live while dragging, at most once per frame.
+          scheduleDragMapUpdate();
         }
       });
 
       marker.on("dragend", () => {
         if (draggedVertex) {
+          cancelScheduledDragMapUpdate();
           const nextCoordinate = getDraggedVertexCoordinate(draggedVertex);
           draggedVertex.marker.setLngLat(nextCoordinate);
           updateGeometryCoordinate(
@@ -4986,6 +5880,10 @@
   }
 
   function addVertexAtPoint(feature, lngLat, point) {
+    if (hasBlockingRawEdit("editing vertices")) {
+      return false;
+    }
+
     if (!feature?.geometry) {
       return false;
     }
@@ -5054,6 +5952,10 @@
   }
 
   function deleteVertexAtIndex(feature, index) {
+    if (hasBlockingRawEdit("editing vertices")) {
+      return false;
+    }
+
     const result = deleteGeometryCoordinate(feature, index);
     if (!result.ok) {
       setStatus(result.message, result.type || "");
@@ -5157,6 +6059,47 @@
     }
 
     return coordinates;
+  }
+
+  let dragMapUpdateFrame = null;
+
+  function scheduleDragMapUpdate() {
+    if (dragMapUpdateFrame) {
+      return;
+    }
+    dragMapUpdateFrame = window.requestAnimationFrame(() => {
+      dragMapUpdateFrame = null;
+
+      // While dragging, only the dragged feature's geometry changed and
+      // array order can't have shifted, so send MapLibre a single-feature
+      // diff instead of re-serialising every feature on the source.
+      const source =
+        sourceSupportsUpdateData && map.getSource("geojson-data");
+      if (
+        source &&
+        draggedVertex &&
+        Number.isInteger(draggedVertex.featureIndex)
+      ) {
+        source.updateData({
+          update: [
+            {
+              id: draggedVertex.featureIndex,
+              newGeometry: draggedVertex.feature.geometry,
+            },
+          ],
+        });
+        return;
+      }
+
+      updateMap(currentGeoJson);
+    });
+  }
+
+  function cancelScheduledDragMapUpdate() {
+    if (dragMapUpdateFrame) {
+      window.cancelAnimationFrame(dragMapUpdateFrame);
+      dragMapUpdateFrame = null;
+    }
   }
 
   function updateGeometryCoordinate(feature, index, newCoord) {

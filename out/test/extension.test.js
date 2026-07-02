@@ -59,6 +59,20 @@ suite("GeoJSON Visual Editor", () => {
         const text = (0, extension_1.fromWebviewText)('{"type":"FeatureCollection","features":[]}');
         assert.strictEqual(text, '{\n  "type": "FeatureCollection",\n  "features": []\n}');
     });
+    test("rejects invalid edited webview JSON before persisting", () => {
+        assert.throws(() => (0, extension_1.fromWebviewText)("{ invalid"), /expected|invalid/i);
+    });
+    test("passes preformatted webview edits through without re-formatting", () => {
+        const preformatted = '{\n  "type": "FeatureCollection",\n  "features": []\n}';
+        assert.strictEqual((0, extension_1.resolveWebviewEditText)(preformatted, true), preformatted);
+    });
+    test("re-formats webview edits that are not marked preformatted", () => {
+        const text = (0, extension_1.resolveWebviewEditText)('{"type":"FeatureCollection","features":[]}', false);
+        assert.strictEqual(text, '{\n  "type": "FeatureCollection",\n  "features": []\n}');
+    });
+    test("still validates webview edits that are not marked preformatted", () => {
+        assert.throws(() => (0, extension_1.resolveWebviewEditText)("{ invalid", false), /expected|invalid/i);
+    });
     test("allows Cartograph font loading in the webview CSP", () => {
         const csp = (0, extension_1.buildWebviewCsp)("vscode-resource:", "nonce-value");
         assert.match(csp, /script-src 'nonce-nonce-value' https:\/\/unpkg.com/);
@@ -77,6 +91,7 @@ suite("GeoJSON Visual Editor", () => {
             defaultLabelsEnabled: true,
             defaultLabelFontFamily: "Open Sans Bold",
             defaultLabelSize: 16,
+            defaultCategoricalPalette: "pastel",
         });
         assert.deepStrictEqual(settings, {
             uiScale: 1.25,
@@ -88,6 +103,7 @@ suite("GeoJSON Visual Editor", () => {
             defaultLabelsEnabled: true,
             defaultLabelFontFamily: "Open Sans Bold",
             defaultLabelSize: 16,
+            defaultCategoricalPalette: "pastel",
         });
     });
     test("falls back for invalid editor settings", () => {
